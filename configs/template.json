@@ -1,0 +1,26 @@
+{
+  "gdb": "/path/to/xxx.gdb",
+  "database": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "dbname": "postgres",
+    "user": "postgres",
+    "password_env": "GDB2PG_PGPASSWORD",
+    "schema": "public",
+    "ssl": "prefer",
+    "ensure_postgis": false
+  },
+  "default": {
+    "srid": 4490,
+    "mode": "create",
+    "geometries": true,
+    "create_spatial_index": true,
+    "launder_columns": false,
+    "on_error": "abort"
+  },
+  "selectors": {
+    "include": ["*"],
+    "exclude": []
+  },
+  "layers": []
+}

@@ -1,0 +1,28 @@
+{
+  "gdb": "/Users/haigeek/dev/tys/gis/data/test1.gdb",
+  "database": {
+    "host": "127.0.0.1",
+    "port": 5433,
+    "dbname": "gdb2pg_test",
+    "user": "postgres",
+    "password_env": null,
+    "schema": "public",
+    "ssl": "prefer",
+    "ensure_postgis": false
+  },
+  "default": {
+    "srid": 4490,
+    "mode": "overwrite",
+    "geometries": true,
+    "create_spatial_index": true,
+    "launder_columns": false,
+    "on_error": "abort"
+  },
+  "selectors": {
+    "include": [
+      "*"
+    ],
+    "exclude": []
+  },
+  "layers": []
+}

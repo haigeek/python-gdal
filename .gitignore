@@ -1,0 +1,17 @@
+# 环境与缓存（体积大，不入库；不带尾斜杠以同时忽略 .conda 符号链接）
+.conda
+.mamba
+.home
+.cache
+.tools
+
+# 本地验证库数据目录
+pgdata/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS
+.DS_Store
