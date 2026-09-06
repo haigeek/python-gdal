@@ -1,0 +1,51 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Web 服务（gdb2pg web，调试）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "gdb2pg",
+      "python": "${workspaceFolder}/.conda/bin/python",
+      "args": ["web", "--config", "configs/web.dev.json"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "env": {},
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "导入 dry-run 预览（configs/example.json）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "gdb2pg",
+      "python": "${workspaceFolder}/.conda/bin/python",
+      "args": ["import", "--config", "configs/example.json", "--dry-run"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "导入正式执行（configs/example.json）",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "gdb2pg",
+      "python": "${workspaceFolder}/.conda/bin/python",
+      "args": ["import", "--config", "configs/example.json"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "调试当前 Python 文件/测试",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "python": "${workspaceFolder}/.conda/bin/python",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "management": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "dbname": "g2p_meta",
+    "user": "postgres",
+    "password_env": "G2P_MGMT_PGPASSWORD",
+    "schema": "g2p",
+    "ssl": "prefer"
+  },
+  "host": "127.0.0.1",
+  "port": 8000,
+  "workers": 1,
+  "uploads_dir": "uploads",
+  "allowed_base_dirs": [
+    "/srv/gisdata"
+  ],
+  "max_upload_mb": 2048
+}

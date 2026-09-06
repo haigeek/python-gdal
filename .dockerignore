@@ -1,0 +1,16 @@
+# 构建上下文排除：详见各注释
+.git
+.conda
+.conda-pkgs
+.miniconda
+.env
+.npm-cache
+uploads
+tests
+.vscode
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+frontend/dist
+frontend/.npm-cache
+*.md

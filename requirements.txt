@@ -1,0 +1,7 @@
+# gdb2pg Web 服务 Python 依赖
+# GDAL Python 绑定由 Docker 基础镜像提供（ghcr.io/osgeo/gdal），无需在此安装
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart
+httpx
+psycopg[binary]>=3.2

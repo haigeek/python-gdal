@@ -1,0 +1,20 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.conda/bin/python",
+  "python.terminal.activateEnvironment": false,
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}"
+  ],
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true,
+    "gdb2pg/web/static": true,
+    "frontend/node_modules": true,
+    ".conda-pkgs": true,
+    "pgdata": true
+  },
+  "search.exclude": {
+    "gdb2pg/web/static": true,
+    "frontend/node_modules": true
+  },
+  "python-envs.defaultEnvManager": "ms-python.python:system"
+}

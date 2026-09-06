@@ -1,0 +1,31 @@
+# 外置镜像方案：不本地构建，直接使用仓库/本地的 python-gdal-web 镜像。
+# 用法（三选一，二选一也行）：
+#   docker compose -f docker-compose.external.yml up -d
+#   docker compose -f docker-compose.external.yml pull && docker compose -f docker-compose.external.yml up -d
+#   G2P_IMAGE=python-gdal-web:latest docker compose -f docker-compose.external.yml up -d
+# 配置仍全部走配置文件：cp configs/web.json.example configs/web.json 并填写
+# 业务库连接；./configs 已 bind 到 /app/configs，改后 docker compose restart web。
+services:
+  web:
+    image: ${G2P_IMAGE:-registry.example.com/middleware/python-gdal-web:latest}
+    ports:
+      - "8000:8000"
+    environment:
+      # Web 服务读取的配置文件（宿主机 ./configs/web.json）
+      G2P_WEB_CFG: /app/configs/web.json
+      # 监听所有网卡（配置文件中 host 写 127.0.0.1 时仅容器内可访问，这里统一覆盖）
+      G2P_WEB_HOST: 0.0.0.0
+    volumes:
+      # 配置文件目录映射：宿主机 ./configs <-> 容器 /app/configs（改配置无需重建镜像）
+      - ./configs:/app/configs
+      # GDB zip 上传解压目录（配置文件 uploads_dir 默认 uploads = /app/uploads）
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/task-types')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+volumes:
+  uploads:

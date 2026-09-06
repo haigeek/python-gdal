@@ -1,0 +1,33 @@
+# 外置业务库方案：Postgres/PostGIS 由外部提供（不在本 compose 内）。
+# 全部配置走配置文件：复制 configs/web.json.example 为 configs/web.json
+# 并填写业务库连接；./configs 已 bind 到容器 /app/configs，改宿主机配置
+# 文件后 docker compose restart web 即生效（无需重建镜像）。
+# 一键起：cp configs/web.json.example configs/web.json && docker compose up -d
+services:
+  web:
+    build:
+      context: .
+      args:
+        # 基础镜像可覆盖（加速源示例，放 .env 即可）：
+        # GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.10.2
+        GDAL_IMAGE: ${GDAL_IMAGE:-ghcr.io/osgeo/gdal:ubuntu-small-3.10.2}
+    ports:
+      - "8000:8000"
+    environment:
+      # Web 服务读取的配置文件（宿主机 ./configs/web.json）
+      G2P_WEB_CFG: /app/configs/web.json
+      # 监听所有网卡（配置文件中 host 写 127.0.0.1 时仅容器内可访问，这里统一覆盖）
+      G2P_WEB_HOST: 0.0.0.0
+    volumes:
+      # 配置文件目录映射：宿主机 ./configs <-> 容器 /app/configs（改配置无需重建镜像）
+      - ./configs:/app/configs
+      # GDB zip 上传解压目录（配置文件 uploads_dir 默认 uploads = /app/uploads）
+      - uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/task-types')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  uploads:
