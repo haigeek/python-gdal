@@ -68,7 +68,7 @@ class LayerRule:
     table: Optional[str] = None  # 目标表名；缺省 = 源名（保留原名）
     srid: Optional[int] = None   # 强制 SRID；缺省继承 default.srid
     mode: Optional[str] = None   # create | overwrite | append；缺省继承 default.mode
-    geom_column: str = "geom"
+    geom_column: Optional[str] = None  # 几何列名；缺省继承 default.geom_column
     columns: dict = field(default_factory=dict)  # 源列名 -> 目标列名（rename）
 
 
@@ -78,8 +78,13 @@ class Defaults:
     mode: str = "create"              # create | overwrite | append
     geometries: bool = True           # 是否导入几何
     create_spatial_index: bool = True
-    launder_columns: bool = False     # 列名转小写下划线（默认保真）
+    launder_columns: bool = True      # 列名转小写下划线（默认开启）
+    launder_tables: bool = True       # 表名转小写下划线（默认开启）
     on_error: str = "abort"           # abort | skip
+    fid_pk: bool = True               # 用 GDB 原生主键（OGR FID = OBJECTID）作目标表主键；
+                                      # False 时回退自增 bigserial（列名固定 fid）
+    pk_column: str = "objectid"       # fid_pk=True 时主键列名（默认 objectid，即 GDB 主键）
+    geom_column: str = "geom"         # 几何列名缺省（可被图层规则覆盖）
 
 
 @dataclass
@@ -101,17 +106,24 @@ class ImportConfig:
             for src in [s.strip() for s in r.source.split(",") if s.strip()]:
                 rr = LayerRule(
                     source=src, table=r.table, srid=r.srid, mode=r.mode,
-                    geom_column=r.geom_column, columns=dict(r.columns),
+                    geom_column=r.geom_column,
+                    columns=dict(r.columns),
                 )
                 rules.append(rr)
         return rules
 
     @staticmethod
     def from_dict(d: dict) -> "ImportConfig":
+        """从 dict 构造。构造时过滤未知键（如任务表单带入的 datasource_id
+        引用字段），而不是把未知参数传给 dataclass 构造器。"""
         d = dict(d)
-        d["database"] = DatabaseConfig(**d["database"])
-        d["default"] = Defaults(**d.get("default", {}))
-        d["layers"] = [LayerRule(**x) for x in d.get("layers", [])]
+
+        def known(cls, fields: dict) -> dict:
+            return {k: v for k, v in fields.items() if k in cls.__dataclass_fields__}
+
+        d["database"] = DatabaseConfig(**known(DatabaseConfig, d.get("database") or {}))
+        d["default"] = Defaults(**known(Defaults, d.get("default") or {}))
+        d["layers"] = [LayerRule(**known(LayerRule, x)) for x in d.get("layers", [])]
         return ImportConfig(**d)
 
     @staticmethod
@@ -136,6 +148,8 @@ class LayerPlan:
     srid: Optional[int]
     mode: str                   # create | overwrite | append
     feature_count: int
-    columns: list                # [(源列名, 目标列名, pg类型, ogr类型)]
+    columns: list                # [(源列名, 目标列名, pg类型)]
     issues: list                 # 警告列表
     errors: list                 # 致命错误（不通则跳过该层）
+    fid_pk: bool = True          # 目标表主键用 GDB 原生 FID（=OBJECTID）
+    pk_column: str = "objectid"  # fid_pk=True 时主键列名

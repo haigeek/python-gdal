@@ -49,8 +49,12 @@ def launder_name(name: str) -> str:
     return s or "col"
 
 
-def normalize_table_name(name: str, max_bytes: int = PG_MAX_IDENT_BYTES) -> str:
-    """表名规范化：保留原名（调用方加引号）；超长则截断加短哈希防碰撞。"""
+def normalize_table_name(name: str, max_bytes: int = PG_MAX_IDENT_BYTES,
+                         launder: bool = False) -> str:
+    """表名规范化：默认保留原名（调用方加引号）；launder=True 时转小写、
+    特殊字符转下划线（同列名清洗）；超长则截断加短哈希防碰撞。"""
+    if launder:
+        name = launder_name(name)
     raw = name.encode("utf-8")
     if len(raw) <= max_bytes:
         return name
@@ -146,10 +150,22 @@ def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "L
     errors: list[str] = []
 
     table = rule.table or source
-    table = normalize_table_name(table)
+    table = normalize_table_name(table, launder=defaults.launder_tables)
+    if defaults.launder_tables and table != (rule.table or source):
+        issues.append(f"表名转小写：{rule.table or source} -> {table}")
 
     cols, warns = column_defs(meta["fields"], rule, defaults.launder_columns)
     issues.extend(warns)
+
+    # 主键列名：仅来自 default.pk_column（默认 OBJECTID）；
+    # 值始终用 GDB 原生 FID（=OBJECTID）
+    pk_column = defaults.pk_column
+    # 若该名字与某普通字段同名，此字段不再作为普通列导入（避免重名列）
+    removed = [src for src, dst, _ in cols
+               if dst.lower() == pk_column.lower()]
+    if removed:
+        cols = [c for c in cols if c[1].lower() != pk_column.lower()]
+        issues.append(f"字段 {removed} 与主键列 {pk_column} 同名，不再重复导入为普通列")
 
     geom_pg, srid, gissues = geom_plan(meta, rule, defaults)
     issues.extend(gissues)
@@ -165,7 +181,7 @@ def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "L
         source=source,
         table=table,
         schema=schema,
-        geom_column=rule.geom_column,
+        geom_column=rule.geom_column or defaults.geom_column,
         geometry_pg=geom_pg,
         srid=srid,
         mode=mode,
@@ -173,4 +189,6 @@ def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "L
         columns=cols,
         issues=issues,
         errors=errors,
+        fid_pk=defaults.fid_pk,
+        pk_column=pk_column,
     )

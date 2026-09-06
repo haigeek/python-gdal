@@ -94,9 +94,19 @@ class PgWriter:
         geom_ddl = self._geom_ddl(plan.geom_column, plan.geometry_pg, plan.srid)
         if geom_ddl is not None:
             col_defs.append(geom_ddl)
-        query = sql.SQL("CREATE TABLE {schema}.{table} (fid bigserial PRIMARY KEY, {cols})").format(
+        # 主键列：fid_pk=True（默认，GDB 原生主键）建 plan.pk_column
+        #（默认 OBJECTID）integer 主键，COPY 时写入 GDB FID；否则回退自增
+        # bigserial（列名 fid）。列名经 Identifier 加引号，保留原大小写，
+        # 与 COPY 列名一致（未加引号的 OBJECTID 会被 PG 折叠成小写）。
+        if plan.fid_pk:
+            pk_ddl = sql.SQL("{} integer PRIMARY KEY").format(
+                sql.Identifier(plan.pk_column))
+        else:
+            pk_ddl = sql.SQL("fid bigserial PRIMARY KEY")
+        query = sql.SQL("CREATE TABLE {schema}.{table} ({pk}, {cols})").format(
             schema=sql.Identifier(schema),
             table=sql.Identifier(table),
+            pk=pk_ddl,
             cols=sql.SQL(", ").join(col_defs),
         )
         with self.conn.cursor() as cur:
@@ -127,16 +137,23 @@ class PgWriter:
         plan: LayerPlan,
         features: Iterator[tuple[dict, Optional[bytes]]],
         progress: Optional[Callable[[int], None]] = None,
+        cancel: Optional[Callable[[], bool]] = None,
         commit_every: int = 0,
     ) -> int:
         """COPY 写入一个图层。返回写入行数。
 
-        features: 逐条产出 (属性dict[源字段名], EWKB bytes|None)。
+        features: 逐条产出 (属性dict[源字段名], EWKB bytes|None, FID int)。
+        progress(n): 每 5000 条与结束时回调已写行数；
+        cancel(): 每 5000 条检查，返回 True 时抛 ImportCancelled
+                  （调用方负责事务回滚与状态标记）；
         commit_every>0 时每 N 条 COMMIT 一次（大表降内存占用；默认单事务）。
         """
-        # 目标列（按计划顺序）：字段列 + (可选) 几何列
+        # 目标列（按计划顺序）：(可选主键列) + 字段列 + (可选) 几何列
         has_geom = plan.geometry_pg is not None
-        col_idents = [sql.Identifier(dst) for _, dst, _ in plan.columns]
+        col_idents = []
+        if plan.fid_pk:
+            col_idents.append(sql.Identifier(plan.pk_column))
+        col_idents += [sql.Identifier(dst) for _, dst, _ in plan.columns]
         if has_geom:
             col_idents.append(sql.Identifier(plan.geom_column))
         src_names = [src for src, _, _ in plan.columns]
@@ -147,9 +164,10 @@ class PgWriter:
             cols=sql.SQL(", ").join(col_idents),
         )
 
-        # EWKB hex -> PG geometry 文本输入
-        def fmt_row(attrs: dict, ewkb: Optional[bytes]):
-            row = [attrs.get(name) for name in src_names]
+        # EWKB hex -> PG geometry 文本输入；fid_pk=True 时首列写 GDB FID
+        def fmt_row(fid: int, attrs: dict, ewkb: Optional[bytes]):
+            row = [fid] if plan.fid_pk else []
+            row += [attrs.get(name) for name in src_names]
             if has_geom:
                 row.append(ewkb.hex() if ewkb else None)
             return row
@@ -158,10 +176,13 @@ class PgWriter:
         # 单事务模式：外层事务已在 importer 开启；这里直接 COPY
         with self.conn.cursor() as cur:
             with cur.copy(copy_sql) as copy:
-                for attrs, ewkb in features:
-                    copy.write_row(fmt_row(attrs, ewkb))
+                for attrs, ewkb, fid in features:
+                    if cancel is not None and n % 5000 == 0 and n > 0 and cancel():
+                        from .importer import ImportCancelled
+                        raise ImportCancelled("用户取消导入")
+                    copy.write_row(fmt_row(fid, attrs, ewkb))
                     n += 1
-                    if progress is not None and n % 10000 == 0:
+                    if progress is not None and n % 5000 == 0:
                         progress(n)
         if progress is not None:
             progress(n)

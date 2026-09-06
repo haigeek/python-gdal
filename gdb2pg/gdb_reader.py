@@ -45,6 +45,38 @@ def list_layers(ds: ogr.DataSource) -> list[str]:
     return [ds.GetLayerByIndex(i).GetName() for i in range(ds.GetLayerCount())]
 
 
+def gdb_layers_summary(path: str) -> list[dict]:
+    """读取 GDB 全部图层摘要（Web「图层选择」自动填充用）。
+
+    每项：source（图层名）、feature_count（尽力统计）、
+    geometry（PG 类型名或 None）、srid（投影坐标系 EPSG，取不到为 None）、
+    fields（图层字段名列表，供主键列名等选择）。
+    """
+    ds = open_gdb(path)
+    out: list[dict] = []
+    for i in range(ds.GetLayerCount()):
+        lyr = ds.GetLayerByIndex(i)
+        srs = lyr.GetSpatialRef()
+        srid = None
+        if srs is not None:
+            try:
+                srid = int(srs.GetAuthorityCode(None) or srs.GetAuthorityCode("GEOGCS") or 0) or None
+            except (TypeError, ValueError):
+                srid = None
+        field_names = [
+            lyr.GetLayerDefn().GetFieldDefn(j).GetName()
+            for j in range(lyr.GetLayerDefn().GetFieldCount())
+        ]
+        out.append({
+            "source": lyr.GetName(),
+            "feature_count": lyr.GetFeatureCount(True),
+            "geometry": pg_geom_type(lyr.GetGeomType()),
+            "srid": srid,
+            "fields": field_names,
+        })
+    return out
+
+
 def layer_meta(lyr: ogr.Layer) -> dict:
     """图层元数据：SRS、OGR 几何类型、字段定义、要素数。"""
     srs = lyr.GetSpatialRef()
@@ -111,11 +143,12 @@ def _norm_datetime(feat: ogr.Feature, idx: int, ftype: int):
     return feat.GetField(idx)
 
 
-def iter_features(lyr: ogr.Layer, srs=None) -> Iterator[tuple[dict, Optional[bytes]]]:
-    """逐要素产出 (属性dict, EWKB bytes)。
+def iter_features(lyr: ogr.Layer, srs=None) -> Iterator[tuple[dict, Optional[bytes], int]]:
+    """逐要素产出 (属性dict, EWKB bytes, FID)。
 
     - 属性 dict 以【源字段名】为键，值为 str/int/float/None/date/time/datetime；
     - EWKB 为 NDR 扩展格式（含 SRID），几何为 NULL/缺失时返回 None；
+    - FID：OpenFileGDB 即 GDB 内部 OBJECTID（稳定、唯一），可作目标表主键；
     - 调用方负责 patch SRID（见 set_ewkb_srid）。
     """
     defn = lyr.GetLayerDefn()
@@ -139,7 +172,7 @@ def iter_features(lyr: ogr.Layer, srs=None) -> Iterator[tuple[dict, Optional[byt
             # 新版绑定 ExportToWkb 产出的 WKB 不含 SRID；SRID 由
             # set_ewkb_srid 在导入侧统一注入（输入若已是 EWKB 则改写头部）
             ewkb = geom.ExportToWkb(ogr.wkbNDR)
-        yield attrs, ewkb
+        yield attrs, ewkb, feat.GetFID()
 
 
 def observed_geometry_names(lyr: ogr.Layer, limit: int = 200) -> set:

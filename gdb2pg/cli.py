@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from . import __version__
@@ -28,6 +29,11 @@ def main(argv=None) -> int:
     p_inspect.add_argument("--gdb", required=True, help="GDB 路径")
     p_inspect.add_argument("--list-only", action="store_true", help="只列图层名")
     p_inspect.add_argument("--limit", type=int, default=3, help="每层抽样条数")
+
+    p_web = sub.add_parser("web", help="启动 Web 任务管理服务（FastAPI）")
+    p_web.add_argument("--config", default=None, help="Web 配置文件（configs/web.json）")
+    p_web.add_argument("--host", default=None, help="监听地址（覆盖配置/env）")
+    p_web.add_argument("--port", type=int, default=None, help="监听端口（覆盖配置/env）")
 
     args = parser.parse_args(argv)
 
@@ -54,6 +60,22 @@ def main(argv=None) -> int:
             print(f"\n【图层】{n}  type={meta['geom_name']}  count={meta['feature_count']}")
             for f in meta["fields"]:
                 print(f"    {f['name']:<28} {f['type_name']} 宽={f['width']}")
+        return 0
+
+    if args.cmd == "web":
+        from .web.app import create_app
+        from .web.config import WebConfig
+        import uvicorn
+
+        # 配置文件优先级：CLI --config > 环境变量 G2P_WEB_CFG > 纯环境变量
+        cfg = WebConfig.load(args.config or os.environ.get("G2P_WEB_CFG") or None)
+        if args.host:
+            cfg.host = args.host
+        if args.port:
+            cfg.port = args.port
+        print(f"[web] 业务库 {cfg.management.host}:{cfg.management.port}/{cfg.management.dbname}"
+              f" schema={cfg.management.schema}  workers={cfg.workers}")
+        uvicorn.run(create_app(config=cfg), host=cfg.host, port=cfg.port, log_level="info")
         return 0
 
     parser.print_help()
