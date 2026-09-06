@@ -39,3 +39,6 @@ configs/web.json
 # 真实配置（本机路径 / 内网地址等，勿入库；保留 .example / 模板文件）
 configs/web.dev.json
 configs/dev_local.json
+
+# 内网 registry 配置（buildx docker-container 驱动用，含内网地址不入库）
+scripts/buildkitd.toml
