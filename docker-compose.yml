@@ -8,8 +8,8 @@ services:
     build:
       context: .
       args:
-        # 基础镜像可覆盖（加速源示例，放 .env 即可）：
-        # GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.10.2
+        # 基础镜像可覆盖（放 .env 即可）：
+        # GDAL_IMAGE=<你的基础镜像>
         GDAL_IMAGE: ${GDAL_IMAGE:-ghcr.io/osgeo/gdal:ubuntu-small-3.10.2}
     ports:
       - "8000:8000"

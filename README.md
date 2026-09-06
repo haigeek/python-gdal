@@ -177,23 +177,22 @@ docker compose down -v              # 停止并清空数据卷
 - `./configs` 已 bind 到容器 `/app/configs`：之后改 `configs/web.json`（业务库地址、白名单目录、`max_upload_mb`、`upload_ttl_days` 等）**只需 `docker compose restart web`，无需重建镜像**
 - 业务库 schema `g2p` 首次启动自动建表（任务元数据）；导入目标库可以是同一 PostgreSQL/PostGIS（不同 schema/库），主机名直接填外部库地址
 - `uploads_dir` 默认相对路径 `uploads` = 容器 `/app/uploads`（命名卷持久化）；需要浏览宿主机目录时把目录加进 `allowed_base_dirs` 并给 `web` 加挂载
-- 构建基础镜像可用 `.env` 覆盖：`GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.10.2`（加速源）
+- 构建基础镜像可用 `.env` 覆盖：`GDAL_IMAGE=<你的基础镜像>`（默认官方 `ghcr.io/osgeo/gdal:ubuntu-small-3.10.2`）
 
-手动镜像构建（buildx；默认构建当前平台，网络不佳时用加速源覆盖 `GDAL_IMAGE`）：
+手动镜像构建（buildx；默认构建当前平台，基础镜像可用 `GDAL_IMAGE` 覆盖）：
 
 ```bash
 # 1) 构建当前平台镜像（docker compose up --build 内部即此命令）
 docker buildx build -t python-gdal-web:latest .
 
-# 2) 指定 GDAL 基础镜像（如走 ghcr 加速源）
+# 2) 指定自定义 GDAL 基础镜像
 docker buildx build -t python-gdal-web:latest \
-  --build-arg GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.10.2 .
+  --build-arg GDAL_IMAGE=<你的基础镜像> .
 
 # 3) 多平台构建并推送（linux/amd64 + linux/arm64，需已建多架构 buildx 构建器）
 #    docker buildx create --name multi --use   # 首次：多架构构建器（跨平台需模拟）
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  --build-arg GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.10.2 \
   -t <registry>/python-gdal-web:latest --push .
 
 # 验证产物

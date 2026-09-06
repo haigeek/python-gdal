@@ -1,6 +1,6 @@
 # gdb2pg Web 服务镜像
 # 基础镜像：官方 GDAL 镜像（含 OpenFileGDB 读写、Python 绑定）
-# 可用 --build-arg GDAL_IMAGE=... 覆盖（如走加速源 ghcr.io/osgeo/gdal:ubuntu-small-3.10.2）
+# 可用 --build-arg GDAL_IMAGE=... 覆盖（默认官方 ghcr.io/osgeo/gdal:ubuntu-small-3.10.2）
 ARG GDAL_IMAGE=ghcr.io/osgeo/gdal:ubuntu-small-3.10.2
 FROM ${GDAL_IMAGE}
 
