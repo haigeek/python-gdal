@@ -20,6 +20,7 @@ gdb2pg/web/static/
 frontend/node_modules/
 frontend/dist/
 frontend/.npm-cache/
+.npm-cache/
 
 # Python
 __pycache__/
