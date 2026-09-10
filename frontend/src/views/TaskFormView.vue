@@ -42,18 +42,16 @@
           show-icon
           style="margin-top: 12px"
         />
-        <div style="margin-top: 8px">
-          <el-divider content-position="left">高级：完整配置 JSON（类型自述 schema 之外的字段）</el-divider>
-          <el-input v-model="advancedJson" type="textarea" :rows="6" class="mono" placeholder="{}" />
-        </div>
       </template>
     </el-card>
 
-    <el-card v-if="preview" shadow="never">
-      <template #header><b>导入计划预览</b></template>
-      <plan-preview :data="preview" />
-    </el-card>
-    <el-empty v-else-if="!isEdit && !loadingMeta" description="请先选择任务类型" />
+    <el-dialog v-model="previewVisible" title="导入计划预览（dry-run）" width="85%" top="5vh" destroy-on-close>
+      <plan-preview v-if="preview" :data="preview" />
+      <template #footer>
+        <el-button type="primary" @click="previewVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+    <el-empty v-if="!isEdit && !loadingMeta && !currentSchema" description="请先选择任务类型" />
   </div>
 </template>
 
@@ -77,8 +75,8 @@ const loadingMeta = ref(true)
 const selectedType = ref('')
 const name = ref('')
 const config = ref<Record<string, any>>({})
-const advancedJson = ref('')
 const preview = ref<PreviewData | null>(null)
+const previewVisible = ref(false)
 const previewing = ref(false)
 const saving = ref(false)
 const testingKey = ref<string | null>(null)
@@ -218,17 +216,9 @@ function defaultConfig(schema: FormSchema): Record<string, any> {
   return cfg
 }
 
-// 把表单 config 与高级 JSON 合并（高级 JSON 覆盖同名键）
+// 表单 config 即完整配置，直接深拷贝后提交
 function mergedConfig(): Record<string, any> {
-  const merged = JSON.parse(JSON.stringify(config.value))
-  try {
-    const extra = JSON.parse(advancedJson.value || '{}')
-    if (typeof extra === 'object' && extra !== null) Object.assign(merged, extra)
-  } catch {
-    ElMessage.error('高级 JSON 解析失败，请检查格式')
-    throw new Error('JSON 解析失败')
-  }
-  return merged
+  return JSON.parse(JSON.stringify(config.value))
 }
 
 async function doPreview() {
@@ -238,6 +228,7 @@ async function doPreview() {
   preview.value = null
   try {
     preview.value = await previewTask({ type, config: mergedConfig() })
+    previewVisible.value = true
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {
@@ -308,8 +299,8 @@ watch(selectedType, (t) => {
   if (schema) {
     config.value = defaultConfig(schema)
     layerFieldOptions.value = {}
-    advancedJson.value = '{}'
     preview.value = null
+    previewVisible.value = false
   }
 })
 
@@ -322,7 +313,6 @@ onMounted(async () => {
       editType.value = item.type
       name.value = item.name
       config.value = JSON.parse(JSON.stringify(item.config ?? {}))
-      advancedJson.value = '{}'
     } else if (types.value.length) {
       selectedType.value = types.value[0].type
     }
