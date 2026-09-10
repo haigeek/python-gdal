@@ -1,6 +1,12 @@
 <template>
   <div class="dynamic-form">
-    <el-card v-for="group in groups" :key="group.key" shadow="never" class="form-group">
+    <el-card
+      v-for="group in displayGroups"
+      :key="group.key"
+      shadow="never"
+      class="form-group"
+      :class="hasSidePair && !isFullWidth(group) ? 'span-half' : 'span-full'"
+    >
       <template #header>
         <div class="group-header">
           <b>{{ group.label }}</b>
@@ -117,7 +123,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, watch } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import FieldControl from './FieldControl.vue'
 import GdbPathPicker from './GdbPathPicker.vue'
 import ShpPathPicker from './ShpPathPicker.vue'
@@ -136,6 +142,27 @@ const emit = defineEmits<{
 }>()
 
 const local = reactive<Record<string, any>>(deepClone(props.modelValue))
+
+// 两列布局：「默认导入规则(default)」与「目标数据库(database)」同时存在时
+// 并排为两列（仍是两个独立卡片）；数据源 / 图层等其余分组保持通栏全宽。
+// 并排行的位置 = 原顺序中第一个并排分组出现的位置（当前 schema 下为顶部）。
+const SIDE_KEYS = ['default', 'database']
+const hasSidePair = computed(() =>
+  SIDE_KEYS.every((k) => props.groups.some((g) => g.key === k)),
+)
+const displayGroups = computed<FormGroup[]>(() => {
+  if (!hasSidePair.value) return props.groups
+  const side = SIDE_KEYS.map((k) => props.groups.find((g) => g.key === k)!) // default 左，database 右
+  const rest = props.groups.filter((g) => !SIDE_KEYS.includes(g.key))
+  const firstIdx = Math.min(...SIDE_KEYS.map((k) => props.groups.findIndex((g) => g.key === k)))
+  const out = [...rest]
+  out.splice(firstIdx < 0 ? 0 : firstIdx, 0, ...side)
+  return out
+})
+
+function isFullWidth(group: FormGroup) {
+  return !SIDE_KEYS.includes(group.key)
+}
 
 function deepClone(v: unknown): any {
   return JSON.parse(JSON.stringify(v ?? {}))
@@ -211,9 +238,28 @@ function removeRow(group: FormGroup, idx: number) {
 </script>
 
 <style scoped>
-/* 分组卡片单栏纵向堆叠，卡片内字段单列 */
+/* 分组卡片：默认两列网格（默认导入规则 | 目标数据库并排），通栏分组占满整行；
+   窄屏（<900px）回退为单列 */
+.dynamic-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
 .form-group {
-  margin-bottom: 16px;
+  margin: 0;
+  min-width: 0;
+}
+.span-full {
+  grid-column: 1 / -1;
+}
+@media (max-width: 900px) {
+  .dynamic-form {
+    grid-template-columns: 1fr;
+  }
+  .span-half {
+    grid-column: 1 / -1;
+  }
 }
 .group-header {
   display: flex;
