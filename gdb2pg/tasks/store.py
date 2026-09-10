@@ -359,12 +359,20 @@ class TaskStore:
                 return cur.fetchall()
 
     def task_gdb_paths(self) -> set:
-        """全部任务引用的 GDB 绝对路径（清理时保护被引用目录）。"""
+        """全部任务引用的 GDB/SHP 源路径（清理时保护上传文件）。
+
+        方法名保留以兼容现有清理器和外部调用；SHP 路径一并纳入保护。
+        """
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    sql.SQL("SELECT DISTINCT config->>'gdb' AS g FROM {s}.task "
-                            "WHERE config ? 'gdb' AND config->>'gdb' IS NOT NULL").format(
+                    sql.SQL("SELECT DISTINCT g FROM ("
+                            "SELECT config->>'gdb' AS g FROM {s}.task "
+                            "WHERE config ? 'gdb' AND config->>'gdb' IS NOT NULL "
+                            "UNION ALL "
+                            "SELECT config->>'shp' AS g FROM {s}.task "
+                            "WHERE config ? 'shp' AND config->>'shp' IS NOT NULL"
+                            ") AS sources WHERE g IS NOT NULL").format(
                         s=sql.Identifier(self.schema)),
                 )
                 return {r["g"] for r in cur.fetchall()}

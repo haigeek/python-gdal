@@ -3,7 +3,7 @@
     <el-alert v-if="data.error" type="error" :title="data.error" :closable="false" style="margin-bottom: 12px" />
     <div v-if="data.db_error" class="muted" style="margin-bottom: 8px">⚠ {{ data.db_error }}</div>
     <el-descriptions v-if="data.postgis" :column="2" size="small" border style="margin-bottom: 12px">
-      <el-descriptions-item label="GDB">{{ data.gdb }}</el-descriptions-item>
+      <el-descriptions-item label="数据源">{{ data.shp || data.gdb }}</el-descriptions-item>
       <el-descriptions-item label="目标库 PostGIS">{{ data.postgis }}</el-descriptions-item>
     </el-descriptions>
     <el-alert
@@ -27,6 +27,13 @@
         </template>
       </el-table-column>
       <el-table-column prop="mode" label="模式" width="90" />
+      <el-table-column label="主键" min-width="170">
+        <template #default="{ row }">
+          <span v-if="row.pk_source === 'field'">{{ row.pk_field }}（源字段）</span>
+          <span v-else-if="row.pk_source === 'fid'">{{ row.pk_column }}（原生 FID）</span>
+          <span v-else>{{ row.pk_column }}（自增）</span>
+        </template>
+      </el-table-column>
       <el-table-column label="字段" min-width="160">
         <template #default="{ row }">
           <span v-if="row.columns.length" class="muted">

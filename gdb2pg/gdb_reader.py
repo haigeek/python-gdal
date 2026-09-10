@@ -4,7 +4,7 @@
 核心产出：
 - list_layers(ds)                    -> [图层名, ...]
 - layer_meta(lyr)                    -> (spatial_ref, geom_type_name, field_defs, feature_count)
-- iter_features(lyr, srs)            -> 逐要素产出 (属性dict, EWKB bytes 或 None)
+- iter_features(lyr, srs)            -> 逐要素产出 (属性dict, EWKB bytes 或 None, FID)
 """
 
 from __future__ import annotations
@@ -31,6 +31,18 @@ _PG_GEOM_TYPES = {
     ogr.wkbMultiPoint25D: "MULTIPOINTZ",
     ogr.wkbMultiLineString25D: "MULTILINESTRINGZ",
     ogr.wkbMultiPolygon25D: "MULTIPOLYGONZ",
+    ogr.wkbPointM: "POINTM",
+    ogr.wkbLineStringM: "LINESTRINGM",
+    ogr.wkbPolygonM: "POLYGONM",
+    ogr.wkbMultiPointM: "MULTIPOINTM",
+    ogr.wkbMultiLineStringM: "MULTILINESTRINGM",
+    ogr.wkbMultiPolygonM: "MULTIPOLYGONM",
+    ogr.wkbPointZM: "POINTZM",
+    ogr.wkbLineStringZM: "LINESTRINGZM",
+    ogr.wkbPolygonZM: "POLYGONZM",
+    ogr.wkbMultiPointZM: "MULTIPOINTZM",
+    ogr.wkbMultiLineStringZM: "MULTILINESTRINGZM",
+    ogr.wkbMultiPolygonZM: "MULTIPOLYGONZM",
 }
 
 
@@ -86,6 +98,7 @@ def layer_meta(lyr: ogr.Layer) -> dict:
         {
             "name": lyr.GetLayerDefn().GetFieldDefn(i).GetName(),
             "type": lyr.GetLayerDefn().GetFieldDefn(i).GetType(),
+            "subtype": lyr.GetLayerDefn().GetFieldDefn(i).GetSubType(),
             "type_name": lyr.GetLayerDefn().GetFieldDefn(i).GetFieldTypeName(
                 lyr.GetLayerDefn().GetFieldDefn(i).GetType()
             ),

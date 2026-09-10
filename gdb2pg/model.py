@@ -64,11 +64,12 @@ class DatabaseConfig:
 class LayerRule:
     """单个图层的导入规则；缺失字段表示继承 default。"""
 
-    source: str                # GDB 内图层名（支持 * ? 通配，可用逗号分隔多个）
+    source: str                # GDB/SHP 图层名（支持 * ? 通配，可用逗号分隔多个）
     table: Optional[str] = None  # 目标表名；缺省 = 源名（保留原名）
     srid: Optional[int] = None   # 强制 SRID；缺省继承 default.srid
     mode: Optional[str] = None   # create | overwrite | append；缺省继承 default.mode
     geom_column: Optional[str] = None  # 几何列名；缺省继承 default.geom_column
+    pk_field: Optional[str] = None  # SHP 源字段主键；缺省继承 default.pk_field
     columns: dict = field(default_factory=dict)  # 源列名 -> 目标列名（rename）
 
 
@@ -81,19 +82,31 @@ class Defaults:
     launder_columns: bool = True      # 列名转小写下划线（默认开启）
     launder_tables: bool = True       # 表名转小写下划线（默认开启）
     on_error: str = "abort"           # abort | skip
-    fid_pk: bool = True               # 用 GDB 原生主键（OGR FID = OBJECTID）作目标表主键；
-                                      # False 时回退自增 bigserial（列名固定 fid）
-    pk_column: str = "objectid"       # fid_pk=True 时主键列名（默认 objectid，即 GDB 主键）
-    geom_column: str = "geom"         # 几何列名缺省（可被图层规则覆盖）
+    fid_pk: bool = True               # GDB 使用原生 FID（OBJECTID）；SHP 仅兼容旧配置；
+                                      # False 时回退自增 bigserial
+    pk_column: str = "objectid"       # 原生 FID 主键列名（默认 objectid）
+    pk_field: Optional[str] = None     # SHP 默认源字段主键；缺省使用目标自增键
+    geom_column: str = "shape"        # 几何列名缺省（可被图层规则覆盖）
 
 
 @dataclass
 class ImportConfig:
-    gdb: str
-    database: DatabaseConfig
+    # 保留 gdb 字段作为现有配置契约；SHP 任务使用 shp 字段。
+    # gdb 给默认空值，便于同一套计划/导入编排解析两种数据源。
+    gdb: str = ""
+    database: DatabaseConfig = field(default_factory=DatabaseConfig)
     default: Defaults = field(default_factory=Defaults)
     selectors: dict = field(default_factory=lambda: {"include": ["*"], "exclude": []})
     layers: list = field(default_factory=list)  # list[LayerRule]
+    shp: Optional[str] = None                  # .shp 文件或包含 shp 的目录
+
+    def source_path(self) -> str:
+        """返回当前配置的数据源路径；SHP 配置优先使用 shp 字段。"""
+        return self.shp or self.gdb
+
+    def source_kind(self) -> str:
+        """返回数据源类型（gdb 或 shp）。"""
+        return "shp" if self.shp else "gdb"
 
     # ------------------------------------------------ 便捷解析
 
@@ -106,7 +119,7 @@ class ImportConfig:
             for src in [s.strip() for s in r.source.split(",") if s.strip()]:
                 rr = LayerRule(
                     source=src, table=r.table, srid=r.srid, mode=r.mode,
-                    geom_column=r.geom_column,
+                    geom_column=r.geom_column, pk_field=r.pk_field,
                     columns=dict(r.columns),
                 )
                 rules.append(rr)
@@ -122,9 +135,17 @@ class ImportConfig:
             return {k: v for k, v in fields.items() if k in cls.__dataclass_fields__}
 
         d["database"] = DatabaseConfig(**known(DatabaseConfig, d.get("database") or {}))
-        d["default"] = Defaults(**known(Defaults, d.get("default") or {}))
+        default_values = dict(d.get("default") or {})
+        if d.get("shp"):
+            if "fid_pk" not in default_values:
+                # SHP 默认不把记录序号当作业务主键，改用目标表自增键。
+                default_values["fid_pk"] = False
+            if "launder_columns" not in default_values:
+                # DBF 字段默认按源名称保留；用户仍可显式打开清洗。
+                default_values["launder_columns"] = False
+        d["default"] = Defaults(**known(Defaults, default_values))
         d["layers"] = [LayerRule(**known(LayerRule, x)) for x in d.get("layers", [])]
-        return ImportConfig(**d)
+        return ImportConfig(**known(ImportConfig, d))
 
     @staticmethod
     def from_json(path: str) -> "ImportConfig":
@@ -140,7 +161,7 @@ class ImportConfig:
 class LayerPlan:
     """单图层导入前计算好的计划（dry-run 输出项，也是执行时的蓝图）。"""
 
-    source: str                 # GDB 图层名
+    source: str                 # GDB/SHP 图层名
     table: str                  # 目标表名（已规范化）
     schema: str                 # 目标 schema
     geom_column: str            # 几何列名
@@ -151,5 +172,7 @@ class LayerPlan:
     columns: list                # [(源列名, 目标列名, pg类型)]
     issues: list                 # 警告列表
     errors: list                 # 致命错误（不通则跳过该层）
-    fid_pk: bool = True          # 目标表主键用 GDB 原生 FID（=OBJECTID）
-    pk_column: str = "objectid"  # fid_pk=True 时主键列名
+    fid_pk: bool = True          # 兼容 GDB/旧配置：目标表主键用源原生 FID
+    pk_column: str = "objectid"  # 原生 FID 或自增主键的目标列名
+    pk_source: Optional[str] = None  # fid | field | auto
+    pk_field: Optional[str] = None   # SHP 作为主键的源字段名

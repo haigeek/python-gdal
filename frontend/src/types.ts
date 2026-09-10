@@ -16,6 +16,7 @@ export type FieldType =
   | 'enum'
   | 'table'
   | 'gdb_path'
+  | 'shp_path'
 
 export interface FieldDef {
   key: string
@@ -30,7 +31,7 @@ export interface FieldDef {
 export interface TableColumnDef {
   key: string
   label: string
-  type: 'text' | 'int' | 'enum'
+  type: 'text' | 'int' | 'enum' | 'field'
   options?: string[]
 }
 
@@ -96,12 +97,16 @@ export interface PreviewLayer {
   geometry: string | null
   srid: number | null
   columns: { src: string; dst: string; pg: string }[]
+  pk_source?: 'fid' | 'field' | 'auto'
+  pk_field?: string | null
+  pk_column?: string
   issues: string[]
   errors: string[]
 }
 
 export interface PreviewData {
-  gdb: string
+  gdb?: string
+  shp?: string
   layers: PreviewLayer[]
   postgis: string | null
   db_checks: string[]
@@ -113,6 +118,7 @@ export interface BrowseEntry {
   name: string
   is_dir: boolean
   is_gdb: boolean
+  is_shp: boolean
   size?: number
 }
 
@@ -123,8 +129,9 @@ export interface BrowseData {
 }
 
 export interface UploadData {
-  gdb_path: string
-  layers: string[]
+  gdb_path?: string
+  shp_path?: string
+  layers: string[] | GdbLayerInfo[]
   note: string
   cached?: boolean // true: 相同 zip 已上传过，直接复用已有解压
 }

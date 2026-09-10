@@ -15,7 +15,7 @@ from .model import ImportConfig
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m gdb2pg",
-        description="把 File Geodatabase (.gdb) 导入 PostgreSQL/PostGIS（自动建表+写数据）",
+        description="把 File Geodatabase (.gdb) 或 Shapefile (.shp) 导入 PostgreSQL/PostGIS（自动建表+写数据）",
     )
     parser.add_argument("--version", action="version", version=f"gdb2pg {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -24,6 +24,12 @@ def main(argv=None) -> int:
     p_import.add_argument("--config", required=True, help="JSON 配置文件路径")
     p_import.add_argument("--dry-run", action="store_true", help="只输出计划与检查，不写库")
     p_import.add_argument("--schema", default=None, help="覆盖配置中的目标 schema")
+
+    p_shp = sub.add_parser("shp-import", aliases=["import-shp"],
+                           help="导入 SHP（或 --dry-run 预览）")
+    p_shp.add_argument("--config", required=True, help="包含 shp 路径的 JSON 配置文件")
+    p_shp.add_argument("--dry-run", action="store_true", help="只输出计划与检查，不写库")
+    p_shp.add_argument("--schema", default=None, help="覆盖配置中的目标 schema")
 
     p_inspect = sub.add_parser("inspect", help="仅查看 GDB 图层结构（沿用 demo 逻辑）")
     p_inspect.add_argument("--gdb", required=True, help="GDB 路径")
@@ -42,9 +48,18 @@ def main(argv=None) -> int:
         if args.schema:
             cfg.database.schema = args.schema
         if args.dry_run:
-            dry_run(cfg)
+            dry_run(cfg, source_kind="gdb")
             return 0
-        return _run_cli(cfg)
+        return _run_cli(cfg, source_kind="gdb")
+
+    if args.cmd in ("shp-import", "import-shp"):
+        cfg = ImportConfig.from_json(args.config)
+        if args.schema:
+            cfg.database.schema = args.schema
+        if args.dry_run:
+            dry_run(cfg, source_kind="shp")
+            return 0
+        return _run_cli(cfg, source_kind="shp")
 
     if args.cmd == "inspect":
         from . import gdb_reader
@@ -82,9 +97,12 @@ def main(argv=None) -> int:
     return 1
 
 
-def _run_cli(cfg):
+def _run_cli(cfg, source_kind=None):
     try:
-        run(cfg)
+        if source_kind is None:
+            run(cfg)
+        else:
+            run(cfg, source_kind=source_kind)
         return 0
     except Exception as e:
         print(f"[错误] {e}", file=sys.stderr)

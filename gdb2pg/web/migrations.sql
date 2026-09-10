@@ -48,8 +48,8 @@ CREATE TABLE IF NOT EXISTS __SCHEMA__.datasource (
 );
 
 -- 上传记录（zip MD5 去重 + 定时清理）：
--- 相同内容的 zip 直接复用已有解压（gdb_path），避免重复占用空间；
--- 超过 TTL 且未被任何任务引用的记录由清理线程删除 gdb 目录与本行。
+-- 相同内容的 zip 直接复用已有解压（gdb_path 也可存 SHP 主文件路径），避免重复占用空间；
+-- 超过 TTL 且未被任何任务引用的记录由清理线程删除源目录与本行。
 CREATE TABLE IF NOT EXISTS __SCHEMA__.upload (
     id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     md5          char(32) NOT NULL UNIQUE,              -- zip 内容 MD5

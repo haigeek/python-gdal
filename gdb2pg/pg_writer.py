@@ -77,7 +77,12 @@ class PgWriter:
     def _geom_ddl(geom_column: str, geom_pg: str, srid: Optional[int]) -> Optional[sql.Composed]:
         if geom_pg is None:
             return None
-        type_name = "Geometry" if geom_pg == "GENERIC" else geom_pg
+        if geom_pg.startswith("GENERIC"):
+            # GENERICZ/M/ZM 保留维度，兼容曲线或非标准 SHP 几何；
+            # 普通 GENERIC 仍保持原有 geometry(Geometry,srid) DDL。
+            type_name = "Geometry" + geom_pg[len("GENERIC"):]
+        else:
+            type_name = geom_pg
         if srid:
             pgtype = f"{type_name},{srid}"
         else:
@@ -87,27 +92,35 @@ class PgWriter:
 
     def create_table(self, plan: LayerPlan):
         schema, table = plan.schema, plan.table
+        pk_source = getattr(plan, "pk_source", None) or ("fid" if plan.fid_pk else "auto")
         col_defs = [
-            sql.SQL("{} {}").format(sql.Identifier(dst), sql.SQL(pg))
-            for _, dst, pg in plan.columns
+            sql.SQL("{} {}{}").format(
+                sql.Identifier(dst),
+                sql.SQL(pg),
+                sql.SQL(" PRIMARY KEY")
+                if pk_source == "field" and src == plan.pk_field
+                else sql.SQL(""),
+            )
+            for src, dst, pg in plan.columns
         ]
         geom_ddl = self._geom_ddl(plan.geom_column, plan.geometry_pg, plan.srid)
         if geom_ddl is not None:
             col_defs.append(geom_ddl)
-        # 主键列：fid_pk=True（默认，GDB 原生主键）建 plan.pk_column
-        #（默认 OBJECTID）integer 主键，COPY 时写入 GDB FID；否则回退自增
-        # bigserial（列名 fid）。列名经 Identifier 加引号，保留原大小写，
-        # 与 COPY 列名一致（未加引号的 OBJECTID 会被 PG 折叠成小写）。
-        if plan.fid_pk:
-            pk_ddl = sql.SQL("{} integer PRIMARY KEY").format(
-                sql.Identifier(plan.pk_column))
+        if pk_source == "field":
+            # 源字段主键直接复用字段定义，既保留原字段，又避免重复列。
+            all_defs = col_defs
         else:
-            pk_ddl = sql.SQL("fid bigserial PRIMARY KEY")
-        query = sql.SQL("CREATE TABLE {schema}.{table} ({pk}, {cols})").format(
+            # GDB 原生 FID/旧 SHP FID 使用 integer；普通目标主键使用 bigserial。
+            pk_type = "integer" if pk_source == "fid" else "bigserial"
+            pk_ddl = sql.SQL("{} {} PRIMARY KEY").format(
+                sql.Identifier(plan.pk_column), sql.SQL(pk_type))
+            # 字段和几何都可能为空（例如 SHP 关闭几何导入且 DBF 无字段），
+            # 统一拼接定义，避免生成非法的尾逗号 SQL。
+            all_defs = [pk_ddl, *col_defs]
+        query = sql.SQL("CREATE TABLE {schema}.{table} ({cols})").format(
             schema=sql.Identifier(schema),
             table=sql.Identifier(table),
-            pk=pk_ddl,
-            cols=sql.SQL(", ").join(col_defs),
+            cols=sql.SQL(", ").join(all_defs),
         )
         with self.conn.cursor() as cur:
             cur.execute(query)
@@ -135,7 +148,7 @@ class PgWriter:
     def copy_features(
         self,
         plan: LayerPlan,
-        features: Iterator[tuple[dict, Optional[bytes]]],
+        features: Iterator[tuple[dict, Optional[bytes], int]],
         progress: Optional[Callable[[int], None]] = None,
         cancel: Optional[Callable[[], bool]] = None,
         commit_every: int = 0,
@@ -148,10 +161,11 @@ class PgWriter:
                   （调用方负责事务回滚与状态标记）；
         commit_every>0 时每 N 条 COMMIT 一次（大表降内存占用；默认单事务）。
         """
-        # 目标列（按计划顺序）：(可选主键列) + 字段列 + (可选) 几何列
+        pk_source = getattr(plan, "pk_source", None) or ("fid" if plan.fid_pk else "auto")
+        # 目标列（按计划顺序）：(GDB/旧 SHP FID 列) + 字段列 + (可选) 几何列
         has_geom = plan.geometry_pg is not None
         col_idents = []
-        if plan.fid_pk:
+        if pk_source == "fid":
             col_idents.append(sql.Identifier(plan.pk_column))
         col_idents += [sql.Identifier(dst) for _, dst, _ in plan.columns]
         if has_geom:
@@ -164,9 +178,9 @@ class PgWriter:
             cols=sql.SQL(", ").join(col_idents),
         )
 
-        # EWKB hex -> PG geometry 文本输入；fid_pk=True 时首列写 GDB FID
+        # EWKB hex -> PG geometry 文本输入；仅原生 FID 主键模式写入源 FID。
         def fmt_row(fid: int, attrs: dict, ewkb: Optional[bytes]):
-            row = [fid] if plan.fid_pk else []
+            row = [fid] if pk_source == "fid" else []
             row += [attrs.get(name) for name in src_names]
             if has_geom:
                 row.append(ewkb.hex() if ewkb else None)
@@ -175,6 +189,25 @@ class PgWriter:
         n = 0
         # 单事务模式：外层事务已在 importer 开启；这里直接 COPY
         with self.conn.cursor() as cur:
+            if not col_idents:
+                # 只有自增主键且没有任何源字段/几何时，PostgreSQL 不接受
+                # COPY table ()；该极少见边界使用 DEFAULT VALUES，仍保持
+                # 在调用方的单层事务内。
+                insert_sql = sql.SQL("INSERT INTO {schema}.{table} DEFAULT VALUES").format(
+                    schema=sql.Identifier(plan.schema),
+                    table=sql.Identifier(plan.table),
+                )
+                for _attrs, _ewkb, _fid in features:
+                    if cancel is not None and n % 5000 == 0 and n > 0 and cancel():
+                        from .importer import ImportCancelled
+                        raise ImportCancelled("用户取消导入")
+                    cur.execute(insert_sql)
+                    n += 1
+                    if progress is not None and n % 5000 == 0:
+                        progress(n)
+                if progress is not None:
+                    progress(n)
+                return n
             with cur.copy(copy_sql) as copy:
                 for attrs, ewkb, fid in features:
                     if cancel is not None and n % 5000 == 0 and n > 0 and cancel():

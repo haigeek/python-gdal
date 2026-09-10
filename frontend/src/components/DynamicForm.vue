@@ -25,8 +25,13 @@
       <el-form label-width="auto" label-position="left" class="dform-label">
         <!-- 单值组（如 gdb） -->
         <el-form-item v-if="group.single" v-for="f in fieldsOf(group)" :key="f.key" :label="f.label">
-          <gdb-path-picker
-            v-if="f.type === 'gdb_path'"
+          <shp-path-picker
+             v-if="f.type === 'shp_path'"
+             :path="(local[group.key] as string) || ''"
+             @update:path="(v: string) => { local[group.key] = v; emitChange() }"
+           />
+           <gdb-path-picker
+            v-else-if="f.type === 'gdb_path'"
             :path="(local[group.key] as string) || ''"
             @update:path="(v: string) => { local[group.key] = v; emitChange() }"
           />
@@ -82,6 +87,25 @@
               >
                 <el-option v-for="opt in col.options || []" :key="opt" :label="opt" :value="opt" />
               </el-select>
+              <el-select
+                v-for="col in fieldCols(group)"
+                :key="col.key"
+                :model-value="row[col.key] as string"
+                :placeholder="col.label"
+                clearable
+                filterable
+                allow-create
+                default-first-option
+                style="width: 180px"
+                @update:model-value="(v: string) => setCell(row, col.key, v)"
+              >
+                <el-option
+                  v-for="opt in fieldOptions?.[String(row.source)] || []"
+                  :key="opt"
+                  :label="opt"
+                  :value="opt"
+                />
+              </el-select>
               <el-button size="small" type="danger" link @click="removeRow(group, idx)">删除</el-button>
             </div>
             <el-button size="small" type="primary" plain @click="addRow(group)">+ 添加规则</el-button>
@@ -96,12 +120,14 @@
 import { reactive, watch } from 'vue'
 import FieldControl from './FieldControl.vue'
 import GdbPathPicker from './GdbPathPicker.vue'
+import ShpPathPicker from './ShpPathPicker.vue'
 import type { FormGroup, TableColumnDef } from '../types'
 
 const props = defineProps<{
   groups: FormGroup[]
   modelValue: Record<string, any>
   testingKey?: string | null
+  fieldOptions?: Record<string, string[]>
 }>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: Record<string, any>): void
@@ -162,6 +188,7 @@ function colsOf(group: FormGroup, t: TableColumnDef['type']) {
 const textCols = (g: FormGroup) => colsOf(g, 'text')
 const intCols = (g: FormGroup) => colsOf(g, 'int')
 const enumCols = (g: FormGroup) => colsOf(g, 'enum')
+const fieldCols = (g: FormGroup) => colsOf(g, 'field')
 
 function setCell(row: Record<string, unknown>, key: string, v: unknown) {
   row[key] = v

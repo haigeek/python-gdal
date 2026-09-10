@@ -1,8 +1,8 @@
-# python-gdal · GDB 读取 + 导入 PostGIS + Web 任务管理
+# python-gdal · GDB/SHP 读取 + 导入 PostGIS + Web 任务管理
 
 本工程三部分：
 1. **demo_read_gdb.py** —— 用 Python 版 GDAL/OGR 读取 File Geodatabase (.gdb) 的示例；
-2. **gdb2pg（gdb2pg/ 包）** —— 把 .gdb 一键导入 PostgreSQL/PostGIS：自动建表、自动写数据，
+2. **gdb2pg（gdb2pg/ 包）** —— 把 .gdb 或 .shp 一键导入 PostgreSQL/PostGIS：自动建表、自动写数据，
    全部由 JSON 配置驱动；
 3. **Web 可视化任务管理（v0.2.0）** —— FastAPI + Vue3：浏览器新建/查看/增删改查导入任务、
    实时进度日志、dry-run 预览、GDB 本地路径或 zip 上传；抽象任务框架支持未来扩展其他任务类型
@@ -56,7 +56,7 @@ python -m gdb2pg import --config configs/example.json --schema myschema
 python -m gdb2pg inspect --gdb /path/to/xxx.gdb
 ```
 
-### 配置（configs/template.json 为模板）
+### 配置（configs/template.json 为 GDB 模板，configs/shp_template.json 为 SHP 模板）
 
 ```json
 {
@@ -75,11 +75,27 @@ python -m gdb2pg inspect --gdb /path/to/xxx.gdb
 }
 ```
 
+SHP 使用同样的 `database`、`default`、`selectors`、`layers` 配置，将顶层数据源键改为
+`"shp": "/path/to/roads.shp"`（主文件旁的 `.shx/.dbf/.prj/.cpg` 会由 GDAL 自动读取）。
+可直接执行 `python -m gdb2pg shp-import --config configs/shp_template.json`；Web 中会出现独立的
+「SHP → PostGIS 导入」任务类型。SHP 默认保留 DBF 字段原名并使用目标表自增 `fid`；
+可在“默认导入规则”填写 `default.pk_field`，或在图层规则中填写 `pk_field`，选择一个源字段作为主键。
+图层规则值优先于默认规则。OGR FID 不再默认作为业务主键，
+旧配置中的 `fid_pk=true` 仍可兼容使用。
+
+例如：
+
+```json
+"layers": [
+  { "source": "roads", "table": "roads", "pk_field": "OBJECTID" }
+]
+```
+
 - `default.srid`：图层无 SRS 时的兜底 SRID（如 4326/4490/4547）；优先级为
   **图层规则 > 图层自带 EPSG > default.srid**，都没有则该层在 dry-run 报错、不导入；
 - `mode`：`create`（表已存在则失败）| `overwrite`（重建）| `append`（追加）；
 - `on_error`：`abort` | `skip`；`launder_columns`：列名转小写下划线（默认保真）；
-- `layers` 支持通配符与 `columns` 列重命名；密码优先取环境变量（推荐），也可明文写 `password`。
+- `layers` 支持通配符、`columns` 列重命名和 SHP 的 `pk_field` 主键字段选择；密码优先取环境变量（推荐），也可明文写 `password`。
 
 ### 能力与鲁棒性（已在真实数据验证）
 
@@ -214,6 +230,7 @@ docker run --rm -it python-gdal-web:latest python -m gdb2pg web --help
 | 数据库检测 | 任务表单「目标数据库」组一键检测：连通性 / PostgreSQL 与 PostGIS 版本 / schema 是否存在 / 延迟；编辑态自动用已保存密码 |
 | 数据源管理 | 可复用的目标数据库连接（名称唯一、密码脱敏）；任务导入时「从数据源选择」自动填入并微调，保存为独立副本，改数据源不影响已保存任务 |
 | GDB 来源 | 服务器本地路径（目录浏览，限白名单）或上传 zip（自动解压定位 `.gdb`，zip-slip 防护 + 大小限制） |
+| SHP 来源 | 服务器本地 `.shp` 路径（自动读取 sidecar）或上传包含单个 SHP 数据集的 zip |
 | 上传去重与清理 | zip 按内容 MD5 去重（重复上传直接复用已有解压）；超过 TTL 且未被任务引用的上传由后台线程自动清理（`upload_ttl_days`，0=禁用） |
 | 密码处理 | 推荐 `password_env` 环境变量；接口一律脱敏为 `***`，编辑时哨兵保留旧值 |
 
@@ -226,7 +243,8 @@ docker run --rm -it python-gdal-web:latest python -m gdb2pg web --help
 - `POST /api/database/test` `{database, task_id?}` —— 目标数据库连接检测
 - `GET/POST /api/datasources`、`GET/PUT/DELETE /api/datasources/{id}` —— 数据源管理（密码脱敏，`"***"` 哨兵保留旧值）
 - `POST /api/gdb/layers` `{gdb}` —— 读取 GDB 图层清单（自动填充图层选择）
-- `GET /api/gdb/browse?path=` / `POST /api/uploads` —— 目录浏览 / zip 上传（MD5 去重，返回 `cached` 标记）
+- `GET /api/gdb/browse?path=` / `POST /api/uploads` —— GDB 目录浏览 / zip 上传（MD5 去重，返回 `cached` 标记）
+- `POST /api/shp/layers` / `POST /api/shp/uploads` —— SHP 图层读取 / 单数据集 zip 上传
 
 ### 测试（需本地业务库，scripts/dev_db.sh）
 
@@ -238,6 +256,7 @@ python tests/test_schema_mapper.py             # 模式映射/清洗（纯函数
 python tests/test_task_store.py                # 业务库存取层
 python tests/test_tasks_api.py                 # API 全链路（假类型）
 G2P_TEST_GDB=/path/to/xxx.gdb python tests/test_web_e2e.py  # 真实 GDB 端到端
+python tests/test_shp_reader.py                 # SHP 读取层（无需数据库）
 ```
 
 > 前端类型检查/构建：`cd frontend && npm run build`（内含 `vue-tsc --noEmit`）；开发模式 `npm run dev`（5173，`/api` 已代理到 8000）。
@@ -251,7 +270,7 @@ G2P_TEST_GDB=/path/to/xxx.gdb python tests/test_web_e2e.py  # 真实 GDB 端到�
 | 依赖 | 版本 | 用途 |
 | --- | --- | --- |
 | Python | 3.11（3.10+ 均可） | 运行环境 |
-| GDAL（`osgeo`，含 OGR） | ≥ 3.6 | 读取 GDB |
+| GDAL（`osgeo`，含 OGR） | ≥ 3.6 | 读取 GDB/SHP |
 | psycopg (v3) | ≥ 3.1 | 连接 PostgreSQL/PostGIS |
 | fastapi / uvicorn / python-multipart | 最新 | Web 服务（Part 3，可选） |
 | httpx | 最新 | Web API 测试（可选） |

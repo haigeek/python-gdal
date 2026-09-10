@@ -1,5 +1,5 @@
 {
-  "gdb": "/path/to/xxx.gdb",
+  "shp": "/path/to/roads.shp",
   "database": {
     "host": "127.0.0.1",
     "port": 5432,
@@ -11,11 +11,13 @@
     "ensure_postgis": false
   },
   "default": {
-    "srid": 4490,
+    "srid": 4326,
     "mode": "create",
     "geometries": true,
     "create_spatial_index": true,
     "launder_columns": false,
+    "launder_tables": true,
+    "pk_field": "",
     "geom_column": "shape",
     "on_error": "abort"
   },

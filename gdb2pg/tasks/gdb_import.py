@@ -38,7 +38,7 @@ _FORM_SCHEMA = {
                  "help": "目标表主键使用 GDB 原生 OBJECTID（OGR FID，稳定唯一）；关闭则回退自增 bigserial"},
                 {"key": "pk_column", "label": "主键列名", "type": "text", "default": "objectid",
                  "help": "使用 GDB 主键时主键列名（默认 objectid）"},
-                {"key": "geom_column", "label": "几何列名", "type": "text", "default": "geom",
+                {"key": "geom_column", "label": "几何列名", "type": "text", "default": "shape",
                  "help": "几何字段列名（缺省值，可被图层规则逐层覆盖）"},
                 {"key": "on_error", "label": "单层失败处理", "type": "enum",
                  "options": ["abort", "skip"], "default": "abort"},
@@ -110,6 +110,13 @@ class GdbImportTask(TaskType):
     type = "gdb_import"
     label = "GDB → PostGIS 导入"
     form_schema = _FORM_SCHEMA
+    import_source_kind = "gdb"
+    source_key = "gdb"
+    source_label = "GDB"
+
+    def prepare_config(self, config: dict) -> dict:
+        """给具体数据源任务做配置归一；GDB 保持原样。"""
+        return config
 
     # ------------------------------------------------------------ 校验
 
@@ -120,6 +127,8 @@ class GdbImportTask(TaskType):
             errs.append("GDB 路径不能为空")
         elif not os.path.isdir(gdb):
             errs.append(f"GDB 路径不是目录或不存在: {gdb}")
+        if (config or {}).get("shp"):
+            errs.append("GDB 任务不能同时配置 shp")
 
         db = (config or {}).get("database") or {}
         for k in ("host", "dbname", "user"):
@@ -156,9 +165,9 @@ class GdbImportTask(TaskType):
     # ------------------------------------------------------------ 预览
 
     def preview(self, config: dict) -> dict:
-        cfg = ImportConfig.from_dict(config)
+        cfg = ImportConfig.from_dict(self.prepare_config(config))
         out = {
-            "gdb": cfg.gdb,
+            self.source_key: cfg.source_path(),
             "layers": [],
             "postgis": None,
             "db_checks": [],
@@ -166,9 +175,9 @@ class GdbImportTask(TaskType):
             "db_error": None,
         }
         try:
-            plans = plan_all(cfg)
+            plans = plan_all(cfg, source_kind=self.import_source_kind)
         except Exception as e:  # noqa: BLE001 GDB 打不开等，预览不致命
-            out["error"] = f"读取 GDB 失败: {e}"
+            out["error"] = f"读取 {self.source_label} 失败: {e}"
             return out
         for p in plans:
             out["layers"].append({
@@ -180,6 +189,9 @@ class GdbImportTask(TaskType):
                 "geometry": p.geometry_pg,
                 "srid": p.srid,
                 "columns": [{"src": s, "dst": d, "pg": t} for s, d, t in p.columns],
+                "pk_source": p.pk_source,
+                "pk_field": p.pk_field,
+                "pk_column": p.pk_column,
                 "issues": p.issues,
                 "errors": p.errors,
             })
@@ -200,7 +212,7 @@ class GdbImportTask(TaskType):
     # ------------------------------------------------------------ 执行
 
     def run(self, ctx: TaskContext, config: dict) -> dict:
-        cfg = ImportConfig.from_dict(config)
+        cfg = ImportConfig.from_dict(self.prepare_config(config))
 
         def _log(msg: str):
             # 任务日志入库（前端面板展示）并镜像到服务端控制台，便于调试
@@ -214,7 +226,8 @@ class GdbImportTask(TaskType):
             })
 
         try:
-            stats = import_run(cfg, log=_log, progress=_progress, cancel=ctx.cancel)
+            stats = import_run(cfg, log=_log, progress=_progress, cancel=ctx.cancel,
+                               source_kind=self.import_source_kind)
         except ImportCancelled:
             raise TaskCancelled() from None
         except Exception:

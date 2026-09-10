@@ -100,7 +100,7 @@ def test_iter_features(ds, layers):
         fnames = [f["name"] for f in meta["fields"]]
 
         n = 0
-        for attrs, ewkb in gdb_reader.iter_features(lyr, meta["srs"]):
+        for attrs, ewkb, _fid in gdb_reader.iter_features(lyr, meta["srs"]):
             # 契约：属性键 == 字段名集合
             assert set(attrs) == set(fnames), f"{name}: 属性键与字段结构不一致"
             # EWKB 合法：None=空几何；否则 NDR/BE 字节序 + 至少 5 字节
@@ -141,7 +141,7 @@ def test_read_srid_chain(ds, layers):
         if meta["geom_ogrid"] in (ogr.wkbNone, ogr.wkbUnknown):
             continue
         injected = False
-        for _, ewkb in gdb_reader.iter_features(lyr, meta["srs"]):
+        for _, ewkb, _fid in gdb_reader.iter_features(lyr, meta["srs"]):
             if ewkb is None:
                 continue
             out = gdb_reader.set_ewkb_srid(ewkb, 4490)

@@ -64,8 +64,10 @@ def normalize_table_name(name: str, max_bytes: int = PG_MAX_IDENT_BYTES,
     return f"{prefix}_{suffix}"
 
 
-def pg_type_for_field(ftype: int, width: int) -> tuple[str, Optional[str]]:
-    """OGR 字段类型码 -> (PG 类型, 警告)。"""
+def pg_type_for_field(ftype: int, width: int, subtype: int = 0) -> tuple[str, Optional[str]]:
+    """OGR 字段类型码/子类型 -> (PG 类型, 警告)。"""
+    if subtype == getattr(ogr, "OFSTBoolean", -1):
+        return "boolean", None
     if ftype in (ogr.OFTString, ogr.OFTWideString):
         if 0 < width <= 8192:
             return f"varchar({width})", None
@@ -90,7 +92,7 @@ def column_defs(meta_fields: list[dict], rule, launder: bool) -> tuple[list[tupl
         dst = rule.columns.get(src, src)
         if launder:
             dst = launder_name(dst)
-        pg, warn = pg_type_for_field(f["type"], f["width"])
+        pg, warn = pg_type_for_field(f["type"], f["width"], f.get("subtype", 0))
         if warn:
             warns.append(f"[{src}] {warn}")
         if dst in assigned:
@@ -112,6 +114,13 @@ def layer_srs_srid(srs) -> Optional[int]:
     return None
 
 
+def _geometry_dimension_suffix(ogr_type: int) -> str:
+    """OGR 几何类型的维度后缀（Z/M/ZM），未知时返回空。"""
+    has_z = bool(getattr(ogr, "GT_HasZ", lambda _: False)(ogr_type))
+    has_m = bool(getattr(ogr, "GT_HasM", lambda _: False)(ogr_type))
+    return ("z" if has_z else "") + ("m" if has_m else "")
+
+
 def geom_plan(meta: dict, rule, defaults) -> tuple[Optional[str], Optional[int], list[str]]:
     """几何列计划 -> (PG几何类型|None, SRID|None, 问题清单)。
 
@@ -122,10 +131,15 @@ def geom_plan(meta: dict, rule, defaults) -> tuple[Optional[str], Optional[int],
     issues: list[str] = []
     if not defaults.geometries:
         return None, None, issues
+    # wkbNone 表示纯属性层，不是未知几何；不能创建泛型 geometry 列，
+    # 否则无 SRS 的 DBF/SHP 也会被错误要求 SRID。
+    if meta["geom_ogrid"] == ogr.wkbNone:
+        return None, None, issues
 
     geom_pg = pg_geom_type(meta["geom_ogrid"])
     if geom_pg is None:
-        geom_pg = "GENERIC"
+        dimension = _geometry_dimension_suffix(meta["geom_ogrid"])
+        geom_pg = "GENERIC" + dimension.upper()
         issues.append(f"图层几何类型 {meta['geom_name']} 映射为泛型 geometry 列")
 
     # SRID 优先级：图层规则强制 > 图层自带 SRS > default.srid 兜底
@@ -142,12 +156,29 @@ def geom_plan(meta: dict, rule, defaults) -> tuple[Optional[str], Optional[int],
     return geom_pg, srid, issues
 
 
-def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "LayerPlan":
-    """组装单图层计划（供 dry-run 与执行共用）。"""
+def _unique_target_name(base: str, used: set[str]) -> str:
+    """在目标列名集合中生成不冲突的辅助列名。"""
+    candidate = base
+    n = 2
+    while candidate.lower() in used:
+        candidate = f"{base}_{n}"
+        n += 1
+    return candidate
+
+
+def build_layer_plan(source: str, rule, meta, defaults, schema: str,
+                     source_kind: str = "gdb") -> "LayerPlan":
+    """组装单图层计划（供 dry-run 与执行共用）。
+
+    SHP 与 GDB 的主键策略分开处理：SHP 默认保留全部 DBF 字段，
+    只有配置 ``pk_field`` 时才把某个源字段设为主键；GDB 沿用原有
+    ``fid_pk``/``pk_column`` 逻辑。
+    """
     from .model import LayerPlan
 
     issues: list[str] = []
     errors: list[str] = []
+    is_shp = source_kind == "shp"
 
     table = rule.table or source
     table = normalize_table_name(table, launder=defaults.launder_tables)
@@ -157,18 +188,86 @@ def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "L
     cols, warns = column_defs(meta["fields"], rule, defaults.launder_columns)
     issues.extend(warns)
 
-    # 主键列名：仅来自 default.pk_column（默认 OBJECTID）；
-    # 值始终用 GDB 原生 FID（=OBJECTID）
-    pk_column = defaults.pk_column
-    # 若该名字与某普通字段同名，此字段不再作为普通列导入（避免重名列）
-    removed = [src for src, dst, _ in cols
-               if dst.lower() == pk_column.lower()]
-    if removed:
-        cols = [c for c in cols if c[1].lower() != pk_column.lower()]
-        issues.append(f"字段 {removed} 与主键列 {pk_column} 同名，不再重复导入为普通列")
-
     geom_pg, srid, gissues = geom_plan(meta, rule, defaults)
     issues.extend(gissues)
+    geom_column = rule.geom_column or defaults.geom_column
+
+    # 默认 pk_source=None 时按旧字段推导，兼容外部直接构造 LayerPlan 的调用方。
+    pk_source = "fid" if defaults.fid_pk else "auto"
+    pk_field = None
+    pk_column = defaults.pk_column if defaults.fid_pk else "fid"
+
+    rule_pk_field = rule.pk_field
+    if rule_pk_field is None or (isinstance(rule_pk_field, str) and not rule_pk_field.strip()):
+        requested_value = defaults.pk_field
+    else:
+        requested_value = rule_pk_field
+    requested = requested_value.strip() if isinstance(requested_value, str) else ""
+    if is_shp and requested_value is not None and not isinstance(requested_value, str):
+        errors.append("主键字段必须为字符串")
+        requested_value = None
+    if is_shp and requested:
+        matches = [src for src, _dst, _pg in cols if src == requested]
+        if not matches:
+            matches = [src for src, _dst, _pg in cols
+                       if src.lower() == requested.lower()]
+        if not matches:
+            errors.append(f"主键字段不存在：{requested}")
+            pk_field = requested
+            pk_column = requested
+        else:
+            pk_field = matches[0]
+            pk_column = next(dst for src, dst, _pg in cols if src == pk_field)
+        pk_source = "field"
+    elif is_shp:
+        # SHP 默认不使用 OGR FID；fid_pk=True 仅用于兼容此前已经保存的配置。
+        pk_source = "fid" if defaults.fid_pk else "auto"
+        if pk_source == "fid":
+            issues.append("兼容旧配置：SHP 使用 OGR FID；建议改为选择 pk_field")
+
+    if is_shp and pk_source in ("field", "auto"):
+        # 源字段必须原样保留。若源字段恰好叫 shape，则移动辅助几何列，
+        # 不通过重命名源字段来解决 DDL 冲突。
+        used = {dst.lower() for _src, dst, _pg in cols}
+        if geom_pg is not None and geom_column.lower() in used:
+            old_geom_column = geom_column
+            geom_column = _unique_target_name(f"{geom_column}_geom", used)
+            issues.append(
+                f"几何列 {old_geom_column} 与源字段冲突，几何列改为 {geom_column}，保留源字段")
+            used.add(geom_column.lower())
+        if pk_source == "auto":
+            old_pk_column = pk_column
+            pk_column = _unique_target_name(pk_column, used | {
+                geom_column.lower() if geom_pg is not None else "",
+            })
+            if pk_column != old_pk_column:
+                issues.append(
+                    f"自增主键列 {old_pk_column} 与源字段冲突，改为 {pk_column}")
+    else:
+        # GDB 以及显式启用旧 SHP OGR FID 的配置保持原有冲突处理行为。
+        if defaults.fid_pk:
+            removed = [src for src, dst, _ in cols
+                       if dst.lower() == pk_column.lower()]
+            if removed:
+                cols = [c for c in cols if c[1].lower() != pk_column.lower()]
+                issues.append(f"字段 {removed} 与主键列 {pk_column} 同名，不再重复导入为普通列")
+
+        reserved = {"fid"} if not defaults.fid_pk else set()
+        if geom_pg is not None:
+            reserved.add(geom_column.lower())
+        if reserved:
+            used = {dst.lower() for _, dst, _ in cols}
+            adjusted = []
+            for src, dst, pg in cols:
+                if dst.lower() not in reserved:
+                    adjusted.append((src, dst, pg))
+                    continue
+                base = f"{dst}_attr"
+                candidate = _unique_target_name(base, used | reserved)
+                used.add(candidate.lower())
+                adjusted.append((src, candidate, pg))
+                issues.append(f"字段 {src} 与保留列 {dst} 冲突，目标列改为 {candidate}")
+            cols = adjusted
 
     mode = rule.mode or defaults.mode
     if mode not in ("create", "overwrite", "append"):
@@ -181,7 +280,7 @@ def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "L
         source=source,
         table=table,
         schema=schema,
-        geom_column=rule.geom_column or defaults.geom_column,
+        geom_column=geom_column,
         geometry_pg=geom_pg,
         srid=srid,
         mode=mode,
@@ -189,6 +288,8 @@ def build_layer_plan(source: str, rule, meta: dict, defaults, schema: str) -> "L
         columns=cols,
         issues=issues,
         errors=errors,
-        fid_pk=defaults.fid_pk,
+        fid_pk=pk_source == "fid",
         pk_column=pk_column,
+        pk_source=pk_source,
+        pk_field=pk_field,
     )

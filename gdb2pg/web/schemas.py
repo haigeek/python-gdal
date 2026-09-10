@@ -54,3 +54,9 @@ class GdbLayersRequest(BaseModel):
     """读取 GDB 图层清单（用于新建任务自动填充「图层选择」）。"""
 
     gdb: str = Field(..., min_length=1)
+
+
+class ShpLayersRequest(BaseModel):
+    """读取 SHP 图层清单（用于新建任务自动填充「图层选择」）。"""
+
+    shp: str = Field(..., min_length=1)

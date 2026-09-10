@@ -17,13 +17,14 @@ from typing import Optional
 import psycopg
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 
-from .. import gdb_reader
+from .. import gdb_reader, shp_reader
 from ..model import DatabaseConfig
 from ..tasks import ALL_STATUS, EDITABLE, RUNNABLE, get_task_type, registered_types
 from ..tasks.store import STATUS_QUEUED, STATUS_RUNNING, TaskStore
 from .config import WebConfig
 from .schemas import (DataSourceCreate, DataSourceUpdate, DatabaseTestRequest,
-                      GdbLayersRequest, PreviewRequest, TaskCreate, TaskUpdate)
+                      GdbLayersRequest, PreviewRequest, ShpLayersRequest,
+                      TaskCreate, TaskUpdate)
 from ..gdb_reader import gdb_layers_summary
 
 router = APIRouter(prefix="/api")
@@ -221,6 +222,23 @@ def gdb_layers(body: GdbLayersRequest, request: Request):
     return {"ok": True, "data": {"gdb": resolved, "layers": layers}}
 
 
+# ---------------------------------------------------------------- SHP 图层清单
+
+@router.post("/shp/layers")
+def shp_layers(body: ShpLayersRequest, request: Request):
+    """读取单个 SHP 或 SHP 目录的图层摘要。"""
+    resolved = _resolve_under(_cfg(request), body.shp)
+    if resolved is None:
+        raise HTTPException(403, "路径越界：仅允许配置目录范围内的 SHP")
+    if not (os.path.isfile(resolved) or os.path.isdir(resolved)):
+        raise HTTPException(400, f"SHP 文件/目录不存在或不可读: {resolved}")
+    try:
+        layers = shp_reader.shp_layers_summary(resolved)
+    except Exception as e:  # noqa: BLE001 打不开/无 GDAL 驱动等
+        raise HTTPException(400, f"读取 SHP 图层失败: {e}")
+    return {"ok": True, "data": {"shp": resolved, "layers": layers}}
+
+
 # ---------------------------------------------------------------- zip 上传
 
 @router.post("/uploads")
@@ -268,6 +286,79 @@ def upload_zip(request: Request, file: UploadFile = File(...)):
         success = True
         return {"ok": True, "data": {
             "gdb_path": gdb_path,
+            "layers": layers,
+            "cached": False,
+            "note": "已解压到服务器，任务将使用此路径导入",
+        }}
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"上传/解压失败: {e}")
+    finally:
+        file.file.close()
+        if not success:
+            shutil.rmtree(dest, ignore_errors=True)
+
+
+@router.post("/shp/uploads")
+def upload_shp_zip(request: Request, file: UploadFile = File(...)):
+    """上传包含一个 Shapefile 数据集的 zip（主文件及 sidecar 一并解压）。
+
+    一个压缩包若包含多个 .shp，拒绝自动选择，避免把错误数据集导入数据库；
+    多图层场景可直接填写服务器上的 SHP 目录并在图层表中选择。
+    """
+    cfg = _cfg(request)
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(400, "仅支持 .zip 文件（SHP 及其 sidecar 打包）")
+    dest = os.path.join(cfg.uploads_abs(), uuid.uuid4().hex)
+    zpath = os.path.join(dest, "source.zip")
+    os.makedirs(dest, exist_ok=True)
+    success = False
+    try:
+        size_limit = cfg.max_upload_mb * 1024 * 1024
+        md5 = _save_upload(file, zpath, size_limit)
+        hit = _store(request).upload_find(md5)
+        if hit is not None:
+            cached_path = hit["gdb_path"]
+            if (os.path.isfile(cached_path)
+                    and cached_path.lower().endswith(".shp")):
+                try:
+                    layers = shp_reader.shp_layers_summary(cached_path)
+                except Exception:
+                    # 记录存在但源文件已损坏/sidecar 不完整：删除失效
+                    # 记录，继续按新上传处理，避免缓存永久毒化。
+                    _store(request).upload_delete(hit["id"])
+                else:
+                    _store(request).upload_touch(hit["id"])
+                    success = True
+                    shutil.rmtree(dest, ignore_errors=True)
+                    return {"ok": True, "data": {
+                        "shp_path": cached_path,
+                        "layers": layers,
+                        "cached": True,
+                        "note": "相同内容的压缩包已上传过，直接复用已有 SHP",
+                    }}
+            else:
+                # 与 GDB 上传保持一致：缓存记录指向的源已被清理时，
+                # 删除失效记录后重新解压本次上传。
+                _store(request).upload_delete(hit["id"])
+        _safe_extract(zpath, dest)
+        shp_files = _find_shp_files(dest)
+        if len(shp_files) != 1:
+            shown = ", ".join(shp_files[:8]) if shp_files else "无"
+            raise HTTPException(
+                400,
+                f"压缩包必须恰好包含一个 .shp 数据集，实际 {len(shp_files)} 个: {shown}",
+            )
+        shp_path = shp_files[0]
+        try:
+            layers = shp_reader.shp_layers_summary(shp_path)
+        except Exception as e:  # noqa: BLE001 GDAL 打不开则报错
+            raise HTTPException(400, f"SHP 无法被 GDAL 打开: {e}")
+        _store(request).upload_record(md5, shp_path, os.path.getsize(zpath))
+        success = True
+        return {"ok": True, "data": {
+            "shp_path": shp_path,
             "layers": layers,
             "cached": False,
             "note": "已解压到服务器，任务将使用此路径导入",
@@ -394,13 +485,15 @@ def _list_dir(path: str) -> dict:
         full = os.path.join(path, name)
         if os.path.isdir(full):
             entries.append({"name": name, "is_dir": True,
-                            "is_gdb": name.lower().endswith(".gdb")})
+                            "is_gdb": name.lower().endswith(".gdb"),
+                            "is_shp": False})
         else:
             try:
                 size = os.path.getsize(full)
             except OSError:
                 size = 0
-            entries.append({"name": name, "is_dir": False, "is_gdb": False, "size": size})
+            entries.append({"name": name, "is_dir": False, "is_gdb": False,
+                            "is_shp": name.lower().endswith(".shp"), "size": size})
     return {"path": path, "parent": parent, "entries": entries}
 
 
@@ -462,6 +555,23 @@ def _safe_extract(zpath: str, dest: str):
             os.makedirs(os.path.dirname(target), exist_ok=True)
             with zf.open(info) as src, open(target, "wb") as out:
                 shutil.copyfileobj(src, out)
+
+
+def _find_shp_files(root: str, depth: int = 0) -> list[str]:
+    """递归查找 zip 解压目录中的 .shp 主文件（最多深度 3）。"""
+    found: list[str] = []
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return found
+    for name in names:
+        full = os.path.join(root, name)
+        if os.path.isdir(full):
+            if depth < 3:
+                found.extend(_find_shp_files(full, depth + 1))
+        elif name.lower().endswith(".shp"):
+            found.append(full)
+    return found
 
 
 def _find_gdb_dir(root: str, depth: int = 0) -> Optional[str]:

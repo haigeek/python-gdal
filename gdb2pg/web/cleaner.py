@@ -2,7 +2,7 @@
 """uploads 目录定时清理。
 
 策略：删除「超过 TTL 且未被任何任务引用」的上传（zip MD5 去重表 upload）；
-被任务 config.gdb 引用的目录始终保留。TTL <= 0 时禁用。
+被任务 config.gdb/config.shp 引用的目录始终保留。TTL <= 0 时禁用。
 """
 
 from __future__ import annotations

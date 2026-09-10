@@ -41,9 +41,10 @@ class TaskType(ABC):
 
     # 驱动前端动态表单的结构化描述（见 gdb_import.py 内示例）：
     #   {"groups": [{"key","label","fields":[
-    #       {"key","label","type":"text|int|bool|password|enum|table|gdb_path",
+    #       {"key","label","type":"text|int|bool|password|enum|table|gdb_path|shp_path",
     #        "default","options"(enum), "help"}],
     #     "table"(type=table 时): {"columns":[{"key","label","type"}], "label"}}]}
+    #     表格列 type 也可为 field，由前端按当前图层字段提供选择项。
     form_schema: dict = {}
 
     def validate(self, config: dict) -> list[str]:

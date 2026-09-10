@@ -17,7 +17,7 @@ import time
 import weakref
 from typing import Callable, Optional
 
-from . import gdb_reader
+from . import gdb_reader, shp_reader
 from .model import ImportConfig, LayerPlan, LayerRule
 from .pg_writer import PgWriter
 from .schema_mapper import build_layer_plan
@@ -25,6 +25,31 @@ from .schema_mapper import build_layer_plan
 
 class ImportCancelled(Exception):
     """协作式取消信号：cancel 回调返回 True 时抛出，由上层决定状态。"""
+
+
+def _source_reader(config: ImportConfig, source_kind: Optional[str] = None):
+    """选择读取器。
+
+    任务类型可显式传 source_kind，避免某个旧 GDB 配置中意外出现扩展
+    字段后改变行为；未显式指定时仍支持按配置自动判断，方便 CLI 直接使用。
+    """
+    kind = source_kind or config.source_kind()
+    if kind == "shp":
+        path = config.shp or config.gdb
+        if not path:
+            raise ValueError("SHP 路径不能为空")
+        return shp_reader, path, "SHP"
+    if kind == "gdb":
+        if not config.gdb:
+            raise ValueError("GDB 路径不能为空")
+        return gdb_reader, config.gdb, "GDB"
+    raise ValueError(f"未知数据源类型: {kind}")
+
+
+def _open_source(reader, path: str):
+    if reader is shp_reader:
+        return reader.open_shp(path)
+    return reader.open_gdb(path)
 
 
 # ---------------------------------------------------------------- 计划构建
@@ -38,16 +63,17 @@ def _match_selectors(name: str, selectors: dict) -> bool:
     return hit
 
 
-def plan_all(config: ImportConfig) -> list[LayerPlan]:
-    """对 GDB 内所有图层生成导入计划（不连库）。
+def plan_all(config: ImportConfig, *, source_kind: Optional[str] = None) -> list[LayerPlan]:
+    """对配置数据源内所有图层生成导入计划（不连库）。
 
     图层选择语义：
     - 显式规则（config.layers）非空 → 只导入规则命中的图层
       （表格中删除的行不会因 selectors 兜底被加回）；
     - 无任何显式规则 → 用选择器（selectors，默认 include=*）兜底全部。
     """
-    ds = gdb_reader.open_gdb(config.gdb)
-    layer_names = gdb_reader.list_layers(ds)
+    reader, source_path, _source_label = _source_reader(config, source_kind)
+    ds = _open_source(reader, source_path)
+    layer_names = reader.list_layers(ds)
 
     rules = config.layer_rules()
     if rules:
@@ -68,9 +94,12 @@ def plan_all(config: ImportConfig) -> list[LayerPlan]:
     for name, rule in selected:
         if rule is None:
             rule = LayerRule(source=name)
-        meta = gdb_reader.layer_meta(ds.GetLayerByName(name))
-        plan = build_layer_plan(name, rule, meta, config.default, config.database.schema)
-        _downgrade_curve_geometry(ds, name, plan)
+        meta = reader.layer_meta(ds.GetLayerByName(name))
+        plan = build_layer_plan(
+            name, rule, meta, config.default, config.database.schema,
+            source_kind=source_kind or config.source_kind(),
+        )
+        _downgrade_curve_geometry(ds, name, plan, reader=reader)
         plans.append(plan)
 
     # 表名碰撞检测
@@ -91,6 +120,10 @@ _BASIC_GEOMS = {
     "multipoint", "multilinestring", "multipolygon",
     "pointz", "linestringz", "polygonz",
     "multipointz", "multilinestringz", "multipolygonz",
+    "pointm", "linestringm", "polygonm",
+    "multipointm", "multilinestringm", "multipolygonm",
+    "pointzm", "linestringzm", "polygonzm",
+    "multipointzm", "multilinestringzm", "multipolygonzm",
 }
 # 各列类型可接受的要素类型家族（PostGIS typmod 兼容矩阵）
 _FAMILY = {
@@ -103,24 +136,43 @@ _FAMILY = {
 }
 
 
-def _acceptable_for(geom_pg: str) -> set:
-    fam = _FAMILY.get(geom_pg.lower())
+def _acceptable_for(geom_pg: str, *, strict_dimension: bool = False) -> set:
+    """返回目标 typmod 可接受的要素类型集合。
+
+    GDB 的旧观察器只返回基础名称，为保持既有兼容矩阵默认放行 Z 变体；
+    SHP 观察器能识别 Z/M/ZM，因此启用严格维度检查避免 COPY 时才失败。
+    """
+    value = geom_pg.lower()
+    dimension = ""
+    for suffix in ("zm", "z", "m"):
+        if value.endswith(suffix):
+            dimension = suffix
+            value = value[:-len(suffix)]
+            break
+    fam = _FAMILY.get(value)
     if not fam:
         return set()
-    return fam | {f + "z" for f in fam}
+    if strict_dimension:
+        return {f + dimension for f in fam}
+    return fam | {f + suffix for f in fam for suffix in ("z", "m", "zm")}
 
 
-def _downgrade_curve_geometry(ds, layer_name: str, plan: LayerPlan):
+def _downgrade_curve_geometry(ds, layer_name: str, plan: LayerPlan, *, reader=gdb_reader):
     """探测实际要素几何：出现曲线/曲面，或类型超出列类型兼容族时降级泛型。"""
-    if plan.geometry_pg is None or plan.geometry_pg == "GENERIC":
+    if plan.geometry_pg is None or plan.geometry_pg.startswith("GENERIC"):
         return
     try:
-        names = gdb_reader.observed_geometry_names(ds.GetLayerByName(layer_name))
+        observer = getattr(reader, "observed_geometry_dimensions", None)
+        names = (observer(ds.GetLayerByName(layer_name)) if observer is not None
+                 else reader.observed_geometry_names(ds.GetLayerByName(layer_name)))
     except Exception:
         return
     if not names:
         return
-    if not names.issubset(_BASIC_GEOMS) or not names.issubset(_acceptable_for(plan.geometry_pg)):
+    strict_dimension = getattr(reader, "observed_geometry_dimensions", None) is not None
+    if (not names.issubset(_BASIC_GEOMS)
+            or not names.issubset(_acceptable_for(
+                plan.geometry_pg, strict_dimension=strict_dimension))):
         declared = plan.geometry_pg
         plan.geometry_pg = "GENERIC"
         plan.issues.append(
@@ -131,15 +183,20 @@ def _downgrade_curve_geometry(ds, layer_name: str, plan: LayerPlan):
 
 # ---------------------------------------------------------------- 报告
 
-def format_plan(plan: LayerPlan, indent: str = "  ") -> list[str]:
+def format_plan(plan: LayerPlan, indent: str = "  ", source_label: str = "GDB") -> list[str]:
     lines = [
         f"{indent}源图层 : {plan.source}",
         f"{indent}目标表 : {plan.schema}.{plan.table}  (mode={plan.mode})",
         f"{indent}要素数 : {plan.feature_count}",
     ]
-    lines.append(f"{indent}主键   : "
-                 + (f"{plan.pk_column}（GDB 原生 FID/OBJECTID）"
-                    if plan.fid_pk else "fid 自增 bigserial"))
+    pk_source = getattr(plan, "pk_source", None) or ("fid" if plan.fid_pk else "auto")
+    if pk_source == "field":
+        pk_text = f"{plan.pk_column}（SHP 源字段 {plan.pk_field}）"
+    elif pk_source == "fid":
+        pk_text = f"{plan.pk_column}（{source_label} 原生 FID/OBJECTID）"
+    else:
+        pk_text = f"{plan.pk_column} 自增 bigserial"
+    lines.append(f"{indent}主键   : {pk_text}")
     if plan.geometry_pg is not None:
         srid = plan.srid if plan.srid is not None else "?"
         lines.append(f"{indent}几何   : {plan.geom_column} geometry({plan.geometry_pg}, {srid})")
@@ -156,25 +213,27 @@ def format_plan(plan: LayerPlan, indent: str = "  ") -> list[str]:
 
 # ---------------------------------------------------------------- 执行
 
-def _features_with_srid(lyr, srs, srid):
+def _features_with_srid(lyr, srs, srid, *, reader=gdb_reader):
     """迭代要素，并把 EWKB 头部 SRID 修正为计划值。产出 (attrs, ewkb, fid)。"""
-    for attrs, ewkb, fid in gdb_reader.iter_features(lyr, srs):
+    for attrs, ewkb, fid in reader.iter_features(lyr, srs):
         if ewkb is not None and srid:
-            ewkb = gdb_reader.set_ewkb_srid(ewkb, srid)
+            ewkb = reader.set_ewkb_srid(ewkb, srid)
         yield attrs, ewkb, fid
 
 
-def dry_run(config: ImportConfig, *, log: Callable[[str], None] = print) -> list[LayerPlan]:
+def dry_run(config: ImportConfig, *, log: Callable[[str], None] = print,
+             source_kind: Optional[str] = None) -> list[LayerPlan]:
     """只读检查：连接目标库（取元数据），输出全部计划与现存表冲突。"""
-    plans = plan_all(config)
+    plans = plan_all(config, source_kind=source_kind)
+    _reader, source_path, source_label = _source_reader(config, source_kind)
     log("=" * 70)
-    log(f"GDB      : {config.gdb}")
+    log(f"{source_label}      : {source_path}")
     log(f"目标库   : {config.database.redacted()}")
     log(f"图层计划 : {len(plans)} 个")
     log("=" * 70)
     for i, p in enumerate(plans, 1):
         log(f"[{i}/{len(plans)}]")
-        for line in format_plan(p):
+        for line in format_plan(p, source_label=source_label):
             log(line)
         log("")
 
@@ -234,7 +293,8 @@ def close_writer_for_thread(tid: int):
 def run(config: ImportConfig, *,
         log: Callable[[str], None] = print,
         progress: Optional[Callable[[int, int, str, int], None]] = None,
-        cancel: Optional[Callable[[], bool]] = None) -> dict:
+        cancel: Optional[Callable[[], bool]] = None,
+        source_kind: Optional[str] = None) -> dict:
     """正式导入。返回汇总统计。
 
     - log(line)：替代 print 输出日志（默认打印到 stdout）；
@@ -243,7 +303,7 @@ def run(config: ImportConfig, *,
     """
     if cancel is not None and cancel():
         raise ImportCancelled("任务已请求取消")
-    plans = plan_all(config)
+    plans = plan_all(config, source_kind=source_kind)
     with PgWriter(config.database) as pg:
         _register_writer(pg)
         try:
@@ -264,7 +324,8 @@ def run(config: ImportConfig, *,
                     log(f"[{i}/{len(plans)}] [跳过] {plan.source}: {plan.errors[0]}")
                     continue
                 try:
-                    _import_one(pg, config, plan, i, len(plans), log, progress, cancel)
+                    _import_one(pg, config, plan, i, len(plans), log, progress, cancel,
+                                source_kind=source_kind)
                     stats["ok"].append((plan.source, plan.feature_count))
                 except ImportCancelled:
                     raise
@@ -289,12 +350,14 @@ def run(config: ImportConfig, *,
 def _import_one(pg: PgWriter, config: ImportConfig, plan: LayerPlan, i: int, total: int,
                 log: Callable[[str], None],
                 progress: Optional[Callable[[int, int, str, int], None]],
-                cancel: Optional[Callable[[], bool]]):
+                cancel: Optional[Callable[[], bool]],
+                source_kind: Optional[str] = None):
     """导入单个图层（单事务，失败整体回滚）。"""
-    ds = gdb_reader.open_gdb(config.gdb)
+    reader, source_path, source_label = _source_reader(config, source_kind)
+    ds = _open_source(reader, source_path)
     try:
         lyr = ds.GetLayerByName(plan.source)
-        meta = gdb_reader.layer_meta(lyr)
+        meta = reader.layer_meta(lyr)
         srs = meta["srs"]
 
         t0 = time.time()
@@ -322,11 +385,16 @@ def _import_one(pg: PgWriter, config: ImportConfig, plan: LayerPlan, i: int, tot
                 elif plan.mode == "overwrite":
                     log(f"[{i}/{total}] 覆盖模式：{plan.schema}.{plan.table} 不存在，直接建表")
                 else:
+                    pk_source = getattr(plan, "pk_source", None) or (
+                        "fid" if plan.fid_pk else "auto")
+                    if pk_source == "field":
+                        pk_text = f"{plan.pk_column}/SHP 源字段 {plan.pk_field}"
+                    elif pk_source == "fid":
+                        pk_text = f"{plan.pk_column}/{source_label} OBJECTID"
+                    else:
+                        pk_text = f"{plan.pk_column}/自增 bigserial"
                     log(f"[{i}/{total}] 动态建表 {plan.schema}.{plan.table}"
-                        f"（{plan.feature_count} 行源数据，主键="
-                        f"{plan.pk_column}/GDB OBJECTID)" if plan.fid_pk
-                        else f"[{i}/{total}] 动态建表 {plan.schema}.{plan.table}"
-                             f"（{plan.feature_count} 行源数据，主键=自增 bigserial）")
+                        f"（{plan.feature_count} 行源数据，主键={pk_text}）")
                 pg.create_table(plan)
 
             def _prog(n: int):
@@ -341,7 +409,8 @@ def _import_one(pg: PgWriter, config: ImportConfig, plan: LayerPlan, i: int, tot
             def _feat_gen():
                 first = True
                 t_first = time.time()
-                for attrs, ewkb, _fid in _features_with_srid(lyr, srs, plan.srid):
+                for attrs, ewkb, _fid in _features_with_srid(
+                        lyr, srs, plan.srid, reader=reader):
                     if first:
                         log(f"[{i}/{total}] 已读取第一个要素（耗时 {time.time() - t_first:.1f}s），开始逐批写入…")
                         first = False
@@ -366,7 +435,9 @@ def _import_one(pg: PgWriter, config: ImportConfig, plan: LayerPlan, i: int, tot
         # 对账
         actual = pg.count_rows(plan.schema, plan.table)
         if actual != plan.feature_count:
-            log(f"      [警告] 导入 {actual} 行，源计数 {plan.feature_count}（OpenFileGDB 计数误差或数据变化）")
+            counter_name = "OpenFileGDB" if source_label == "GDB" else "SHP"
+            log(f"      [警告] 导入 {actual} 行，源计数 {plan.feature_count}"
+                f"（{counter_name} 计数误差或数据变化）")
         dt = time.time() - t0
         log(f"[{i}/{total}] {plan.source} -> {plan.schema}.{plan.table}  共 {n} 行  ({dt:.1f}s)")
     finally:

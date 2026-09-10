@@ -22,6 +22,7 @@ def test_pg_type_for_field():
     assert sm.pg_type_for_field(ogr.OFTTime, 0) == ("time", None)
     assert sm.pg_type_for_field(ogr.OFTDateTime, 0) == ("timestamptz", None)
     assert sm.pg_type_for_field(ogr.OFTBinary, 0) == ("bytea", None)
+    assert sm.pg_type_for_field(ogr.OFTInteger, 1, ogr.OFSTBoolean) == ("boolean", None)
     pg, warn = sm.pg_type_for_field(ogr.OFTIntegerList, 0)
     assert pg == "text" and warn
 
@@ -55,6 +56,11 @@ def test_geom_plan_srid_resolution():
     geom_pg, srid, issues = sm.geom_plan(meta, rule, defaults)
     assert geom_pg == "MULTILINESTRING" and srid == 4490
 
+    plan = sm.build_layer_plan("lines", rule, {
+        **meta, "fields": [], "feature_count": 0,
+    }, defaults, "public")
+    assert plan.geom_column == "shape"
+
     # 图层自带 SRS 优先（未强制时）
     from osgeo import osr
     srs = osr.SpatialReference()
@@ -82,6 +88,35 @@ def test_generic_geometry_for_curves():
     meta = {"geom_ogrid": ogr.wkbCompoundCurve, "geom_name": "Compound Curve", "srs": None}
     geom_pg, srid, issues = sm.geom_plan(meta, LayerRule(source="x"), defaults)
     assert geom_pg == "GENERIC"
+
+
+def test_attribute_only_layer_has_no_geometry_column():
+    defaults = Defaults(srid=None, mode="create")
+    meta = {"geom_ogrid": ogr.wkbNone, "geom_name": "None", "srs": None,
+            "fields": [{"name": "name", "type": ogr.OFTString, "width": 0}],
+            "feature_count": 1}
+    plan = sm.build_layer_plan("attrs", LayerRule(source="attrs"), meta, defaults, "public")
+    assert plan.geometry_pg is None
+    assert not plan.errors
+
+
+def test_gdb_native_fid_strategy_is_unchanged():
+    defaults = Defaults(srid=4326, mode="create")
+    meta = {
+        "geom_ogrid": ogr.wkbPoint,
+        "geom_name": "Point",
+        "srs": None,
+        "fields": [{"name": "OBJECTID", "type": ogr.OFTInteger, "width": 0}],
+        "feature_count": 1,
+    }
+    plan = sm.build_layer_plan(
+        "points", LayerRule(source="points"), meta, defaults, "public",
+        source_kind="gdb",
+    )
+    assert plan.pk_source == "fid"
+    assert plan.pk_column == "objectid"
+    assert plan.fid_pk is True
+    assert "OBJECTID" not in {src for src, _dst, _pg in plan.columns}
 
 
 def test_build_layer_plan_no_srid_error():

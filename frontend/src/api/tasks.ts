@@ -77,5 +77,11 @@ export const browseDir = (path?: string) =>
 export const fetchGdbLayers = (gdb: string) =>
   api.post<{ gdb: string; layers: GdbLayerInfo[] }>('/api/gdb/layers', { gdb })
 
+export const fetchShpLayers = (shp: string) =>
+  api.post<{ shp: string; layers: GdbLayerInfo[] }>('/api/shp/layers', { shp })
+
 export const uploadZip = (file: File, onProgress?: (pct: number) => void) =>
   uploadWithProgress<UploadData>('/api/uploads', file, onProgress)
+
+export const uploadShpZip = (file: File, onProgress?: (pct: number) => void) =>
+  uploadWithProgress<UploadData>('/api/shp/uploads', file, onProgress)

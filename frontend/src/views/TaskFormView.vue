@@ -28,6 +28,7 @@
           v-model="config"
           :groups="currentSchema.groups"
           :testing-key="testingKey"
+          :field-options="layerFieldOptions"
           @group-test="onGroupTest"
           @group-action="onGroupAction"
         />
@@ -63,7 +64,7 @@ import { ElMessage } from 'element-plus'
 import DynamicForm from '../components/DynamicForm.vue'
 import DataSourcePickerDialog from '../components/DataSourcePickerDialog.vue'
 import PlanPreview from '../components/PlanPreview.vue'
-import { createTask, fetchGdbLayers, getTask, listTaskTypes, previewTask, testDatabase, updateTask } from '../api/tasks'
+import { createTask, fetchGdbLayers, fetchShpLayers, getTask, listTaskTypes, previewTask, testDatabase, updateTask } from '../api/tasks'
 import type { DataSourceItem, FormSchema, PreviewData, TaskTypeInfo } from '../types'
 
 const route = useRoute()
@@ -83,21 +84,23 @@ const saving = ref(false)
 const testingKey = ref<string | null>(null)
 const testResult = ref<{ ok: boolean; title: string; detail: string } | null>(null)
 const dsPickerVisible = ref(false)
+const layerFieldOptions = ref<Record<string, string[]>>({})
 
 // 组自定义动作：目前「目标数据库」组的「从数据源选择」
 function onGroupAction(payload: { group: string; action: string }) {
   if (payload.group === 'database' && payload.action === 'from_datasource') {
     dsPickerVisible.value = true
   }
-  if (payload.group === 'layers' && payload.action === 'read_gdb') {
-    const gdb = config.value.gdb
-    if (!gdb) {
-      ElMessage.warning('请先填写 GDB 路径')
+  if (payload.group === 'layers' && (payload.action === 'read_gdb' || payload.action === 'read_shp')) {
+    const source = isShpType() ? config.value.shp : config.value.gdb
+    const label = isShpType() ? 'SHP' : 'GDB'
+    if (!source) {
+      ElMessage.warning(`请先填写 ${label} 路径`)
       return
     }
     if (readingLayers.value) return
     readingLayers.value = true
-    loadLayers(gdb)
+    loadLayers(source)
       .catch((e) => ElMessage.error(`读取图层失败：${e instanceof Error ? e.message : String(e)}`))
       .finally(() => {
         readingLayers.value = false
@@ -122,14 +125,18 @@ function applyDataSource(ds: DataSourceItem) {
 // - 过期响应（GDB 已再次变化）丢弃
 // 读取 GDB 图层并合并进「图层规则」表：保留已有行，增补缺失图层。
 // 供自动（新建防抖）与手动「读取图层」按钮共用。
-async function loadLayers(gdb: string) {
-  const data = await fetchGdbLayers(gdb)
-  if (gdb !== config.value.gdb) return
+async function loadLayers(source: string) {
+  const data = isShpType() ? await fetchShpLayers(source) : await fetchGdbLayers(source)
+  const currentSource = isShpType() ? config.value.shp : config.value.gdb
+  if (source !== currentSource) return
   const kept = new Map<string, Record<string, any>>()
   for (const r of config.value.layers || []) kept.set(String(r.source), r)
   for (const l of data.layers) {
     if (!kept.has(l.source)) kept.set(l.source, { source: l.source })
   }
+  layerFieldOptions.value = Object.fromEntries(
+    data.layers.map((l) => [l.source, l.fields || []]),
+  )
   config.value.layers = [...kept.values()]
   ElMessage.success(
     `已自动读取 ${data.layers.length} 个图层，请在下方表格中选择要导入的图层并设置导入模式`,
@@ -143,13 +150,35 @@ watch(
   () => config.value.gdb,
   (gdb) => {
     if (gdbTimer) clearTimeout(gdbTimer)
-    if (!gdb || isEdit.value) return
+    if (!gdb || isEdit.value || isShpType()) return
     gdbTimer = setTimeout(async () => {
       if (lastFetchedGdb.value === gdb) return
       lastFetchedGdb.value = gdb
       try {
         readingLayers.value = true
         await loadLayers(gdb)
+      } catch {
+        // 打不开或路径越界：静默，交由预览/保存时报错
+      } finally {
+        readingLayers.value = false
+      }
+    }, 600)
+  },
+)
+
+let shpTimer: ReturnType<typeof setTimeout> | null = null
+const lastFetchedShp = ref<string | null>(null)
+watch(
+  () => config.value.shp,
+  (shp) => {
+    if (shpTimer) clearTimeout(shpTimer)
+    if (!shp || isEdit.value || !isShpType()) return
+    shpTimer = setTimeout(async () => {
+      if (lastFetchedShp.value === shp) return
+      lastFetchedShp.value = shp
+      try {
+        readingLayers.value = true
+        await loadLayers(shp)
       } catch {
         // 打不开或路径越界：静默，交由预览/保存时报错
       } finally {
@@ -168,6 +197,7 @@ const typeLabel = computed(() => {
   return t?.label ?? ''
 })
 const editType = ref('')
+const isShpType = () => (isEdit.value ? editType.value : selectedType.value) === 'shp_import'
 
 // 依据 form_schema 生成默认 config
 function defaultConfig(schema: FormSchema): Record<string, any> {
@@ -277,6 +307,7 @@ watch(selectedType, (t) => {
   const schema = types.value.find((x) => x.type === t)?.form_schema
   if (schema) {
     config.value = defaultConfig(schema)
+    layerFieldOptions.value = {}
     advancedJson.value = '{}'
     preview.value = null
   }

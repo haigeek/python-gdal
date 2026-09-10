@@ -148,6 +148,7 @@ async function onFileChange(file: { raw?: File }) {
   uploadNote.value = ''
   try {
     const data = await uploadZip(raw, (pct) => (uploadPct.value = pct))
+    if (!data.gdb_path) throw new Error('服务端未返回 GDB 路径')
     commit(data.gdb_path)
     if (data.cached) {
       uploadNote.value = `✅ 相同文件已上传过，直接复用：${data.gdb_path}`
