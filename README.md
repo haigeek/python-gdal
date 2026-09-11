@@ -195,6 +195,22 @@ docker compose down -v              # 停止并清空数据卷
 - `uploads_dir` 默认相对路径 `uploads` = 容器 `/app/uploads`（命名卷持久化）；需要浏览宿主机目录时把目录加进 `allowed_base_dirs` 并给 `web` 加挂载
 - 构建基础镜像可用 `.env` 覆盖：`GDAL_IMAGE=<你的基础镜像>`（默认官方 `ghcr.io/osgeo/gdal:ubuntu-small-3.10.2`）
 
+一键构建发布（推荐）：前端构建 + buildx 构建推送 + 清理本机历史版本
+
+```bash
+# 镜像名需先设置 G2P_IMAGE（见下）
+G2P_IMAGE=<registry>/middleware/python-gdal-web bash scripts/build_web.sh   # 前端构建 -> buildx --platform linux/amd64 --push -> 清理旧镜像
+bash scripts/build_web.sh --no-push         # 只本地构建，不推送、不清理
+bash scripts/build_web.sh --skip-frontend   # 前端没改，跳过 npm run build 加速
+bash scripts/build_web.sh --tag 20250911    # 自定义日期版本号
+```
+
+- 镜像名由环境变量 `G2P_IMAGE` 提供（不含内网地址，避免入库），可临时指定或写入项目根 `.env`：
+  `G2P_IMAGE=<registry>/middleware/python-gdal-web bash scripts/build_web.sh`；平台用 `G2P_PLATFORM` 覆盖
+- 每次构建打两个标签：`YYYYMMDD`（日期版本，可追溯）与 `latest`（部署用）
+- 清理只删本仓库下**非本次日期且非 latest** 的镜像（被容器占用的会跳过），不影响其他镜像
+- 推送模式下镜像落在 registry，本机不留副本，因此删除的是上一次本地构建的旧版本
+
 手动镜像构建（buildx；默认构建当前平台，基础镜像可用 `GDAL_IMAGE` 覆盖）：
 
 ```bash
