@@ -188,23 +188,93 @@ def iter_features(lyr: ogr.Layer, srs=None) -> Iterator[tuple[dict, Optional[byt
         yield attrs, ewkb, feat.GetFID()
 
 
-def observed_geometry_names(lyr: ogr.Layer, limit: int = 200) -> set:
+def observed_geometry_names(lyr: ogr.Layer, limit: Optional[int] = 200) -> set:
     """采样前 limit 个要素，返回实际出现的几何类型名集合（小写）。
 
     GDB 里常见"图层类型是 Multi Line String、个别要素实为曲线"的脏数据，
     PostGIS typmod 会拒绝曲线写入 LINESTRING/MULTILINESTRING 列，
     因此导入前先探测，必要时降级为泛型 geometry 列。
+
+    ``limit=None`` 表示扫描全部要素，避免固定窗口漏掉尾部脏数据。
     """
     names: set = set()
     lyr.ResetReading()
     for i, feat in enumerate(lyr):
-        if i >= limit:
+        if limit is not None and i >= limit:
             break
         g = feat.GetGeometryRef()
         if g is not None and not g.IsEmpty():
             names.add(g.GetGeometryName().lower())
     lyr.ResetReading()
     return names
+
+
+# 单值类型码 -> Multi 类型码
+_WKB_TO_MULTI = {1: 4, 2: 5, 3: 6}
+_MULTI_TYPES = set(_WKB_TO_MULTI.values())
+
+
+def multi_wkb(ewkb: bytes) -> bytes:
+    """把单值几何 WKB 包装成对应的 Multi 形态。
+
+    Shapefile 的 LineString/Polygon 图层允许个别要素存多段：同一图层里
+    4 千多条 LineString 夹几条 MultiLineString 很常见。此时列必须建为
+    MULTILINESTRING，但逐要素仍会产出 type=2 的 WKB，部分 PostGIS 构建
+    不会把单值隐式转换为多值，COPY 会报
+    "Geometry type (LineString) does not match column type (MultiLineString)"。
+
+    **不能只改类型码**：单值的负载是 ``[nPoints][point...]``，而多值的负载是
+    ``[nGeoms][完整子几何 WKB...]``，两者结构不同。只改类型码会让 PostGIS
+    把第一个点的字节当成子几何头解析，报 ``Unknown WKB type (…)``。
+    正确做法是把原几何作为**唯一子几何**嵌入：
+
+        [字节序][type|标志][nGeoms=1][字节序][原type|标志][原负载...]
+
+    子几何沿用原字节序并**去掉 SRID**（EWKB 规范中 SRID 只在最外层）。
+
+    已是 Multi 或曲线等其它类型时原样返回。
+    """
+    if not ewkb or len(ewkb) < 5:
+        return ewkb
+    is_xdr = ewkb[0] != 1
+    order = "little" if not is_xdr else "big"
+    otype = int.from_bytes(ewkb[1:5], order)
+    base = otype & 0xFF
+    mapped = _WKB_TO_MULTI.get(base)
+    if mapped is None:
+        return ewkb
+
+    has_srid = bool(otype & 0x20000000)
+    # 外层：保留原标志位（Z/M/SRID），仅把基础类型码换成 Multi
+    outer_type = (otype & ~0xFF) | mapped
+    head = bytes([ewkb[0]]) + outer_type.to_bytes(4, order)
+    body = ewkb[5:]
+    if has_srid:
+        head += body[:4]          # SRID 保留在外层
+        body = body[4:]
+    # 子几何：去掉 EWKB 标志（SRID 不重复），保留 Z/M 标志与基础类型码
+    sub_type = (otype & ~0x20000000) & 0xFFFFFFFF
+    sub = bytes([ewkb[0]]) + sub_type.to_bytes(4, order) + body
+    count = (1).to_bytes(4, order)      # nGeoms = 1
+    return head + count + sub
+
+
+def normalize_wkb_to(ewkb: bytes, geom_pg: Optional[str]) -> bytes:
+    """按目标列类型把 WKB 规范成兼容形态。
+
+    列类型族为 Multi（MULTILINESTRING / MULTIPOLYGON / MULTIPOINT）时，
+    把单值要素包装为 Multi，避免 COPY 阶段类型不匹配。其它情况原样返回。
+    """
+    if not ewkb or not geom_pg:
+        return ewkb
+    value = geom_pg.lower()
+    for suffix in ("zm", "z", "m"):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+            break
+    if value in ("multilinestring", "multipolygon", "multipoint"):
+        return multi_wkb(ewkb)
+    return ewkb
 
 
 def set_ewkb_srid(ewkb: bytes, srid: int) -> bytes:

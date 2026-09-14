@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from osgeo import ogr, osr
 
+from gdb2pg import shp_reader
 from gdb2pg.importer import plan_all
 from gdb2pg.model import ImportConfig
 from gdb2pg.tasks import get_task_type
@@ -179,12 +180,160 @@ def test_web_shp_layers_summary_and_path_whitelist():
             raise AssertionError("越界 SHP 路径应被拒绝")
 
 
+def test_multilinestring_beyond_sample_window_promotes_column():
+    """Shapefile 的 LineString 图层可在任意位置藏着多段要素。
+
+    回归：曾固定只采样前 200 个要素，导致第 1561 行的 MultiLineString
+    未被探测，建出严格 LINESTRING 列后 COPY 报
+    "Geometry type (MultiLineString) does not match column type (LineString)"。
+    """
+    from gdb2pg.importer import _downgrade_curve_geometry, _scan_geometry_names
+    from gdb2pg.model import Defaults, LayerRule
+    from gdb2pg.schema_mapper import build_layer_plan
+
+    with tempfile.TemporaryDirectory(prefix="g2p_shp_mls_") as tmp:
+        path = Path(tmp) / "roads.shp"
+        driver = ogr.GetDriverByName("ESRI Shapefile")
+        ds = driver.CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = ds.CreateLayer("roads", srs=srs, geom_type=ogr.wkbLineString)
+        layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+
+        # 1560 条单段线，MultiLineString 落在第 1561 行（旧采样窗口之外）
+        for i in range(1560):
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("name", f"r{i}")
+            geom = ogr.Geometry(ogr.wkbLineString)
+            geom.AddPoint_2D(116 + i * 1e-4, 39.0)
+            geom.AddPoint_2D(116 + i * 1e-4, 39.01)
+            feature.SetGeometry(geom)
+            layer.CreateFeature(feature)
+
+        feature = ogr.Feature(layer.GetLayerDefn())
+        feature.SetField("name", "overpass")
+        multi = ogr.Geometry(ogr.wkbMultiLineString)
+        for dx in (0.0, 0.001):
+            part = ogr.Geometry(ogr.wkbLineString)
+            part.AddPoint_2D(117 + dx, 40.0)
+            part.AddPoint_2D(117 + dx, 40.01)
+            multi.AddGeometry(part)
+        feature.SetGeometry(multi)
+        layer.CreateFeature(feature)
+        ds = None
+
+        ds = shp_reader.open_shp(path)
+        layer = ds.GetLayerByName("roads")
+        meta = shp_reader.layer_meta(layer)
+        defaults = Defaults(geometries=True, srid=4326, mode="create")
+        plan = build_layer_plan("roads", LayerRule(source="roads"), meta,
+                                defaults, "public", source_kind="shp")
+        assert plan.geometry_pg == "LINESTRING", plan.geometry_pg
+
+        # 全量扫描必须看到多段要素（旧的 200 行窗口看不到）
+        assert _scan_geometry_names(layer, shp_reader, limit=200) == {"linestring"}
+        assert _scan_geometry_names(layer, shp_reader) == {
+            "linestring", "multilinestring"}
+
+        _downgrade_curve_geometry(ds, "roads", plan, reader=shp_reader)
+        assert plan.geometry_pg == "MULTILINESTRING", plan.geometry_pg
+        assert any("提升" in issue for issue in plan.issues), plan.issues
+
+
+def test_pure_single_part_layer_stays_linestring():
+    """只有单段线时不应无谓地把列提升为 MULTILINESTRING。"""
+    from gdb2pg.importer import _downgrade_curve_geometry
+    from gdb2pg.model import Defaults, LayerRule
+    from gdb2pg.schema_mapper import build_layer_plan
+
+    with tempfile.TemporaryDirectory(prefix="g2p_shp_single_") as tmp:
+        path = Path(tmp) / "roads.shp"
+        driver = ogr.GetDriverByName("ESRI Shapefile")
+        ds = driver.CreateDataSource(str(path))
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        layer = ds.CreateLayer("roads", srs=srs, geom_type=ogr.wkbLineString)
+        layer.CreateField(ogr.FieldDefn("name", ogr.OFTString))
+        for i in range(5):
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("name", f"r{i}")
+            geom = ogr.Geometry(ogr.wkbLineString)
+            geom.AddPoint_2D(116 + i * 1e-4, 39.0)
+            geom.AddPoint_2D(116 + i * 1e-4, 39.01)
+            feature.SetGeometry(geom)
+            layer.CreateFeature(feature)
+        ds = None
+
+        ds = shp_reader.open_shp(path)
+        layer = ds.GetLayerByName("roads")
+        meta = shp_reader.layer_meta(layer)
+        defaults = Defaults(geometries=True, srid=4326, mode="create")
+        plan = build_layer_plan("roads", LayerRule(source="roads"), meta,
+                                defaults, "public", source_kind="shp")
+        _downgrade_curve_geometry(ds, "roads", plan, reader=shp_reader)
+        assert plan.geometry_pg == "LINESTRING", plan.geometry_pg
+
+
+def test_multi_wkb_wraps_single_geometry_as_sub_geometry():
+    """multi_wkb 必须把单值几何**嵌入**为唯一子几何，而不是只改类型码。
+
+    回归：曾只把类型码 2 改成 5，保留了 [nPoints][point...] 负载。多值的
+    负载应是 [nGeoms][完整子几何 WKB...]，PostGIS 于是把第一个点的字节
+    当成子几何头解析，报 "Unknown WKB type (75990314)"（正是坐标字节）。
+    """
+    from gdb2pg.gdb_reader import multi_wkb, normalize_wkb_to, set_ewkb_srid
+
+    line = ogr.Geometry(ogr.wkbLineString)
+    line.AddPoint_2D(1.0, 2.0)
+    line.AddPoint_2D(3.0, 4.0)
+    wkb = line.ExportToWkb(ogr.wkbNDR)
+
+    # 单值必须原样返回（列类型不是 Multi 时不做任何改动）
+    assert normalize_wkb_to(wkb, "LINESTRING") == wkb
+
+    wrapped = multi_wkb(wkb)
+    assert len(wrapped) > len(wkb), "包装后必须变长（多了 nGeoms + 子几何头）"
+    outer_type = int.from_bytes(wrapped[1:5], "little")
+    assert outer_type & 0xFF == 5, outer_type          # MultiLineString
+    assert int.from_bytes(wrapped[5:9], "little") == 1  # nGeoms == 1
+
+    # 子几何紧跟其后，是一个完整 WKB（字节序 + 类型 + 负载）
+    # 注意子几何自带字节序字节，故类型码位于 [10:14] 而非 [9:13]
+    assert wrapped[9] == wrapped[0], "子几何字节序应与外层一致"
+    sub_type = int.from_bytes(wrapped[10:14], "little")
+    assert sub_type & 0xFF == 2, sub_type              # 子几何为 LineString
+    sub = ogr.CreateGeometryFromWkb(wrapped[9:])
+    assert sub.GetGeometryName().upper() == "LINESTRING"
+    assert sub.GetPointCount() == 2
+
+    # SRID 只出现在最外层，子几何不得重复携带
+    with_srid = multi_wkb(set_ewkb_srid(wkb, 4490))
+    assert int.from_bytes(with_srid[1:5], "little") & 0x20000000
+    assert int.from_bytes(with_srid[5:9], "little") == 4490
+    sub_type_srid = int.from_bytes(with_srid[10:14], "little")
+    assert not (sub_type_srid & 0x20000000), "子几何不应再带 EWKB/SRID 标志"
+
+    # 整体可被 OGR 解析回 MULTILINESTRING（用不带 SRID 的形态验证结构）
+    parseable = multi_wkb(wkb)
+    geom = ogr.CreateGeometryFromWkb(parseable)
+    assert geom.GetGeometryName().upper() == "MULTILINESTRING"
+    assert geom.GetGeometryCount() == 1
+    assert geom.GetGeometryRef(0).GetPointCount() == 2
+
+    # 已是 Multi 时保持幂等
+    assert multi_wkb(parseable) == parseable
+
+
 def main() -> int:
     tests = [test_task_registry_and_validation,
              test_plan_preserves_conflicting_attributes,
              test_fieldless_and_pointz_plans,
              test_shp_config_defaults_and_attribute_only_mode,
-             test_web_shp_layers_summary_and_path_whitelist]
+             test_web_shp_layers_summary_and_path_whitelist,
+             test_multilinestring_beyond_sample_window_promotes_column,
+             test_pure_single_part_layer_stays_linestring,
+             test_multi_wkb_wraps_single_geometry_as_sub_geometry,
+]
     for test in tests:
         test()
         print(f"PASS {test.__name__}")

@@ -35,6 +35,8 @@ from .gdb_reader import (  # noqa: F401  (re-exported compatibility API)
     iter_features as _gdb_iter_features,
     layer_meta as _gdb_layer_meta,
     list_layers,
+    multi_wkb,
+    normalize_wkb_to,
     observed_geometry_names,
     pg_geom_type,
     set_ewkb_srid,
@@ -118,12 +120,16 @@ def iter_features(lyr: ogr.Layer, srs=None):
         yield attrs, ewkb, fid
 
 
-def observed_geometry_dimensions(lyr: ogr.Layer, limit: int = 200) -> set[str]:
-    """采样实际几何并保留 Z/M 维度后缀（point、pointz、pointm、pointzm）。"""
+def observed_geometry_dimensions(lyr: ogr.Layer, limit: Optional[int] = 200) -> set[str]:
+    """采样实际几何并保留 Z/M 维度后缀（point、pointz、pointm、pointzm）。
+
+    ``limit=None`` 表示扫描全部要素：Shapefile 的多段要素可能出现在任意
+    位置（例如第 1561 行），固定窗口采样会漏掉并建出过窄的列类型。
+    """
     names: set[str] = set()
     lyr.ResetReading()
     for i, feat in enumerate(lyr):
-        if i >= limit:
+        if limit is not None and i >= limit:
             break
         geom = feat.GetGeometryRef()
         if geom is None or geom.IsEmpty():
@@ -214,5 +220,7 @@ __all__ = [
     "observed_geometry_dimensions",
     "pg_geom_type",
     "set_ewkb_srid",
+    "multi_wkb",
+    "normalize_wkb_to",
     "shp_layers_summary",
 ]

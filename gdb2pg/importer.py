@@ -136,19 +136,22 @@ _FAMILY = {
 }
 
 
+def _split_dimension(geom_pg: str) -> tuple[str, str]:
+    """'MULTILINESTRINGZM' -> ('multilinestring', 'zm')；无维度后缀时返回 ('...', '')。"""
+    value = geom_pg.lower()
+    for suffix in ("zm", "z", "m"):
+        if value.endswith(suffix):
+            return value[:-len(suffix)], suffix
+    return value, ""
+
+
 def _acceptable_for(geom_pg: str, *, strict_dimension: bool = False) -> set:
     """返回目标 typmod 可接受的要素类型集合。
 
     GDB 的旧观察器只返回基础名称，为保持既有兼容矩阵默认放行 Z 变体；
     SHP 观察器能识别 Z/M/ZM，因此启用严格维度检查避免 COPY 时才失败。
     """
-    value = geom_pg.lower()
-    dimension = ""
-    for suffix in ("zm", "z", "m"):
-        if value.endswith(suffix):
-            dimension = suffix
-            value = value[:-len(suffix)]
-            break
+    value, dimension = _split_dimension(geom_pg)
     fam = _FAMILY.get(value)
     if not fam:
         return set()
@@ -157,28 +160,106 @@ def _acceptable_for(geom_pg: str, *, strict_dimension: bool = False) -> set:
     return fam | {f + suffix for f in fam for suffix in ("z", "m", "zm")}
 
 
+# 单值 -> 多值提升表：Shapefile 的 LineString/Polygon 图层天然允许个别要素
+# 存多段（如立交、双线道路），PostGIS 的 LINESTRING/POLYGON typmod 会拒绝。
+# 这类情况应把列提升为对应的 Multi 类型，而不是整体降级为泛型 geometry。
+_PROMOTE_TO_MULTI = {
+    "point": "multipoint",
+    "linestring": "multilinestring",
+    "polygon": "multipolygon",
+}
+
+
+def _promote_for(observed: set, geom_pg: str, *, strict_dimension: bool = False):
+    """实测类型与声明列类型不兼容时，尝试给出最小的兼容目标类型。
+
+    返回可直接建列的类型名；无法用单一类型覆盖时返回 None（调用方降级泛型）。
+    仅做「单值 -> 多值」提升：要素集合必须属于同一条 Multi 家族且维度一致。
+    """
+    value, dimension = _split_dimension(geom_pg)
+    family = _PROMOTE_TO_MULTI.get(value)
+    if family is None:
+        return None
+    # 声明已经是 Multi 族时没有提升空间
+    if value == family:
+        return None
+    # 维度必须一致，否则交给泛型 geometry 处理（PostGIS typmod 无法同时容纳 Z 与非 Z）
+    dims = {_split_dimension(n)[1] for n in observed}
+    if len(dims) > 1:
+        return None
+    observed_dim = dims.pop() if dims else dimension
+    if not strict_dimension and observed_dim != dimension:
+        return None
+    # 实测类型必须都落在该 Multi 家族内（即单值成员或多值成员本身）
+    bases = {_split_dimension(n)[0] for n in observed}
+    if not bases.issubset({value, family}):
+        return None
+    # 实测全是单值成员：声明列已能容纳，无需提升
+    if family not in bases:
+        return None
+    return family.upper() + observed_dim.upper()
+
+
+def _scan_geometry_names(lyr, reader, *, limit: Optional[int] = None) -> set:
+    """扫描实际要素几何类型；limit=None 表示全量扫描。
+
+    历史实现固定只采样前 200 个要素，导致第 1561 行的 MultiLineString 无法
+    被探测到，建出严格 LINESTRING 列后 COPY 才失败。默认改为全量扫描。
+    """
+    observer = getattr(reader, "observed_geometry_dimensions", None)
+    if observer is None:
+        observer = reader.observed_geometry_names
+    try:
+        # limit=None 必须显式传入：观察器默认参数是 200，省略即退回固定窗口。
+        return set(observer(lyr, limit))
+    except TypeError:
+        # 旧签名观察器不接受 limit 参数，退化为其默认采样行为
+        try:
+            return set(observer(lyr))
+        except Exception:
+            return set()
+    except Exception:
+        return set()
+
+
 def _downgrade_curve_geometry(ds, layer_name: str, plan: LayerPlan, *, reader=gdb_reader):
-    """探测实际要素几何：出现曲线/曲面，或类型超出列类型兼容族时降级泛型。"""
+    """探测实际要素几何并按需调整列类型。
+
+    处理三类情况：
+    1. 出现曲线/曲面等非常规类型 -> 降级泛型 geometry；
+    2. 单值类型混入多值要素（LINESTRING 列遇到 MultiLineString）-> 提升为
+       MULTILINESTRING，避免严格 typmod 在 COPY 阶段才报错；
+    3. 完全无法用单一类型覆盖 -> 降级泛型 geometry。
+
+    默认全量扫描要素，不再固定采样前 200 行。
+    """
     if plan.geometry_pg is None or plan.geometry_pg.startswith("GENERIC"):
         return
-    try:
-        observer = getattr(reader, "observed_geometry_dimensions", None)
-        names = (observer(ds.GetLayerByName(layer_name)) if observer is not None
-                 else reader.observed_geometry_names(ds.GetLayerByName(layer_name)))
-    except Exception:
-        return
+    layer = ds.GetLayerByName(layer_name)
+    names = _scan_geometry_names(layer, reader)
     if not names:
         return
     strict_dimension = getattr(reader, "observed_geometry_dimensions", None) is not None
-    if (not names.issubset(_BASIC_GEOMS)
-            or not names.issubset(_acceptable_for(
+    if (names.issubset(_BASIC_GEOMS)
+            and names.issubset(_acceptable_for(
                 plan.geometry_pg, strict_dimension=strict_dimension))):
-        declared = plan.geometry_pg
-        plan.geometry_pg = "GENERIC"
+        return  # 声明类型已覆盖实测类型
+
+    promoted = _promote_for(names, plan.geometry_pg, strict_dimension=strict_dimension)
+    declared = plan.geometry_pg
+    if promoted is not None and promoted != declared.upper():
+        plan.geometry_pg = promoted
         plan.issues.append(
-            f"实测几何类型 {sorted(names)} 与图层声明 {declared} 不兼容，"
-            f"降级为泛型 geometry 列"
+            f"实测几何类型 {sorted(names)} 超出声明 {declared}，"
+            f"列类型提升为 {promoted}"
         )
+        return
+
+    plan.geometry_pg = "GENERIC"
+    plan.issues.append(
+        f"实测几何类型 {sorted(names)} 与图层声明 {declared} 不兼容，"
+        f"降级为泛型 geometry 列"
+    )
 
 
 # ---------------------------------------------------------------- 报告
@@ -213,11 +294,21 @@ def format_plan(plan: LayerPlan, indent: str = "  ", source_label: str = "GDB") 
 
 # ---------------------------------------------------------------- 执行
 
-def _features_with_srid(lyr, srs, srid, *, reader=gdb_reader):
-    """迭代要素，并把 EWKB 头部 SRID 修正为计划值。产出 (attrs, ewkb, fid)。"""
+def _features_with_srid(lyr, srs, srid, *, reader=gdb_reader, geom_pg: Optional[str] = None):
+    """迭代要素，修正 EWKB 的 SRID，并按目标列类型规范几何形态。
+
+    列类型为 Multi 时会把单值要素提升为 Multi：Shapefile 图层常混有
+    LineString 与 MultiLineString，列必须建为 MULTILINESTRING，但逐要素
+    仍产出 type=2 的 WKB，部分 PostGIS 构建不会隐式转换，COPY 会报
+    "Geometry type (LineString) does not match column type (MultiLineString)"。
+    """
+    normalize = getattr(reader, "normalize_wkb_to", None)
     for attrs, ewkb, fid in reader.iter_features(lyr, srs):
-        if ewkb is not None and srid:
-            ewkb = reader.set_ewkb_srid(ewkb, srid)
+        if ewkb is not None:
+            if srid:
+                ewkb = reader.set_ewkb_srid(ewkb, srid)
+            if normalize is not None:
+                ewkb = normalize(ewkb, geom_pg)
         yield attrs, ewkb, fid
 
 
@@ -410,7 +501,8 @@ def _import_one(pg: PgWriter, config: ImportConfig, plan: LayerPlan, i: int, tot
                 first = True
                 t_first = time.time()
                 for attrs, ewkb, _fid in _features_with_srid(
-                        lyr, srs, plan.srid, reader=reader):
+                        lyr, srs, plan.srid, reader=reader,
+                        geom_pg=plan.geometry_pg):
                     if first:
                         log(f"[{i}/{total}] 已读取第一个要素（耗时 {time.time() - t_first:.1f}s），开始逐批写入…")
                         first = False

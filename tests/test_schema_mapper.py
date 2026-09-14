@@ -74,12 +74,14 @@ def test_geom_plan_srid_resolution():
     geom_pg, srid, issues = sm.geom_plan(meta, rule, defaults)
     assert srid == 4547 and any("不一致" in i for i in issues)
 
-    # 都没有 -> error 信号（srid=None）
+    # 都没有 -> 回落 SRID=0（坐标系未知），不再阻断导入
     meta["srs"] = None
     rule.srid = None
     defaults2 = Defaults(srid=None, mode="create")
-    geom_pg, srid, _ = sm.geom_plan(meta, rule, defaults2)
-    assert srid is None
+    geom_pg, srid, issues = sm.geom_plan(meta, rule, defaults2)
+    assert srid == 0, srid
+    assert geom_pg is not None
+    assert any("SRID=0" in i for i in issues), issues
 
 
 def test_generic_geometry_for_curves():
@@ -118,14 +120,6 @@ def test_gdb_native_fid_strategy_is_unchanged():
     assert plan.fid_pk is True
     assert "OBJECTID" not in {src for src, _dst, _pg in plan.columns}
 
-
-def test_build_layer_plan_no_srid_error():
-    defaults = Defaults(srid=None, mode="create")
-    meta = {"geom_ogrid": ogr.wkbPoint, "geom_name": "Point", "srs": None,
-            "fields": [{"name": "nm", "type": ogr.OFTString, "width": 0}],
-            "feature_count": 3}
-    plan = sm.build_layer_plan("pts", LayerRule(source="pts"), meta, defaults, "public")
-    assert plan.errors and "SRID" in plan.errors[0]
 
 
 if __name__ == "__main__":
