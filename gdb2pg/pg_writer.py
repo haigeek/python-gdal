@@ -83,7 +83,9 @@ class PgWriter:
             type_name = "Geometry" + geom_pg[len("GENERIC"):]
         else:
             type_name = geom_pg
-        if srid:
+        if srid is not None:
+            # 注意用 is not None 而非真值判断：srid=0 是「坐标系未知」的合法
+            # 值，写成 geometry(Type) 会退化成无 typmod 的列。
             pgtype = f"{type_name},{srid}"
         else:
             pgtype = type_name

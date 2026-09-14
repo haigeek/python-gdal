@@ -303,10 +303,15 @@ def _features_with_srid(lyr, srs, srid, *, reader=gdb_reader, geom_pg: Optional[
     "Geometry type (LineString) does not match column type (MultiLineString)"。
     """
     normalize = getattr(reader, "normalize_wkb_to", None)
+    strip_srid = getattr(reader, "strip_ewkb_srid", None)
     for attrs, ewkb, fid in reader.iter_features(lyr, srs):
         if ewkb is not None:
             if srid:
                 ewkb = reader.set_ewkb_srid(ewkb, srid)
+            elif srid == 0 and strip_srid is not None:
+                # SRID=0（坐标系未知）：清掉行内 SRID，避免列定义 0 而行内是
+                # 别的值。PostGIS typmod 不会代劳这个强制转换。
+                ewkb = strip_srid(ewkb)
             if normalize is not None:
                 ewkb = normalize(ewkb, geom_pg)
         yield attrs, ewkb, fid

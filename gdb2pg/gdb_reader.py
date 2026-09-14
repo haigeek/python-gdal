@@ -277,6 +277,24 @@ def normalize_wkb_to(ewkb: bytes, geom_pg: Optional[str]) -> bytes:
     return ewkb
 
 
+def strip_ewkb_srid(ewkb: bytes) -> bytes:
+    """去掉 EWKB 头部携带的 SRID，返回普通 ISO WKB。
+
+    列的 SRID=0（坐标系未知）时必须配合调用：PostGIS 的 typmod **不会**
+    把行内 SRID 强制改成列值，实测写入带 SRID=4490 的 EWKB 会原样落成
+    4490，导致 geometry_columns 写 0、行内却是 4490 的不一致。
+    """
+    if not ewkb or len(ewkb) < 5:
+        return ewkb
+    is_xdr = ewkb[0] != 1
+    order = "little" if not is_xdr else "big"
+    otype = int.from_bytes(ewkb[1:5], order)
+    if not (otype & 0x20000000):
+        return ewkb  # 本就不含 SRID
+    new_type = otype & ~0x20000000
+    return bytes([ewkb[0]]) + new_type.to_bytes(4, order) + ewkb[9:]
+
+
 def set_ewkb_srid(ewkb: bytes, srid: int) -> bytes:
     """返回带指定 SRID 的 NDR EWKB。
 

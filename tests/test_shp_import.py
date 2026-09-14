@@ -324,6 +324,42 @@ def test_multi_wkb_wraps_single_geometry_as_sub_geometry():
     assert multi_wkb(parseable) == parseable
 
 
+def test_srid_zero_is_accepted_by_validation():
+    """srid=0（坐标系未知）在 default 与图层规则两级都必须被接受。
+
+    回归：两级校验曾写成 ``srid > 0``，界面上填 0 保存后会被判非法；
+    配合前端 el-input-number 的 :min=1 钳制，0 会被悄悄改成 1。
+    """
+    task = get_task_type("shp_import")
+    with tempfile.TemporaryDirectory(prefix="g2p_srid0_") as tmp:
+        path = _make_shp(Path(tmp), "roads")
+        db = {"host": "h", "dbname": "d", "user": "u"}
+
+        # default.srid = 0 合法
+        cfg = {"shp": str(path), "database": db, "default": {"srid": 0}}
+        assert [e for e in task.validate(cfg) if "srid" in e] == []
+
+        # 图层规则 srid = 0 合法
+        cfg = {"shp": str(path), "database": db,
+               "layers": [{"source": "roads", "srid": 0}]}
+        assert [e for e in task.validate(cfg) if "srid" in e] == []
+
+        # 正常 SRID 仍然合法
+        for good in (1, 4326, 4490):
+            cfg = {"shp": str(path), "database": db,
+                   "default": {"srid": good},
+                   "layers": [{"source": "roads", "srid": good}]}
+            assert [e for e in task.validate(cfg) if "srid" in e] == [], good
+
+        # 负数与非整数仍必须被拒绝
+        for bad in (-1, "0", 1.5):
+            cfg = {"shp": str(path), "database": db, "default": {"srid": bad}}
+            assert [e for e in task.validate(cfg) if "srid" in e], bad
+            cfg = {"shp": str(path), "database": db,
+                   "layers": [{"source": "roads", "srid": bad}]}
+            assert [e for e in task.validate(cfg) if "srid" in e], bad
+
+
 def main() -> int:
     tests = [test_task_registry_and_validation,
              test_plan_preserves_conflicting_attributes,
@@ -333,7 +369,7 @@ def main() -> int:
              test_multilinestring_beyond_sample_window_promotes_column,
              test_pure_single_part_layer_stays_linestring,
              test_multi_wkb_wraps_single_geometry_as_sub_geometry,
-]
+             test_srid_zero_is_accepted_by_validation]
     for test in tests:
         test()
         print(f"PASS {test.__name__}")

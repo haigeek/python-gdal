@@ -40,6 +40,7 @@ from .gdb_reader import (  # noqa: F401  (re-exported compatibility API)
     observed_geometry_names,
     pg_geom_type,
     set_ewkb_srid,
+    strip_ewkb_srid,
 )
 
 
@@ -220,6 +221,7 @@ __all__ = [
     "observed_geometry_dimensions",
     "pg_geom_type",
     "set_ewkb_srid",
+    "strip_ewkb_srid",
     "multi_wkb",
     "normalize_wkb_to",
     "shp_layers_summary",

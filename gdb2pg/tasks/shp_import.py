@@ -119,8 +119,9 @@ class ShpImportTask(GdbImportTask):
         if default.get("pk_field") is not None and not isinstance(default["pk_field"], str):
             errs.append("default.pk_field 必须为字符串")
         srid = default.get("srid")
-        if srid is not None and not (isinstance(srid, int) and srid > 0):
-            errs.append(f"default.srid 必须为正整数: {srid!r}")
+        # 0 是合法值（坐标系未知）；仅拒绝负数与非整数。
+        if srid is not None and not (isinstance(srid, int) and srid >= 0):
+            errs.append(f"default.srid 必须为非负整数（0 表示坐标系未知）: {srid!r}")
         if default.get("mode") and default["mode"] not in _MODE_ENUM:
             errs.append(f"default.mode 非法: {default['mode']}（可选 {_MODE_ENUM}）")
         if default.get("on_error") and default["on_error"] not in _ON_ERROR_ENUM:
@@ -137,8 +138,10 @@ class ShpImportTask(GdbImportTask):
                 errs.append(f"图层规则[{i}].pk_field 必须为字符串")
             if r.get("mode") and r["mode"] not in _MODE_ENUM:
                 errs.append(f"图层规则[{i}].mode 非法: {r['mode']}")
-            if r.get("srid") is not None and not (isinstance(r["srid"], int) and r["srid"] > 0):
-                errs.append(f"图层规则[{i}].srid 必须为正整数: {r['srid']!r}")
+            srid = r.get("srid")
+            # 与 default.srid 一致：0 合法（坐标系未知），仅拒绝负数/非整数。
+            if srid is not None and not (isinstance(srid, int) and srid >= 0):
+                errs.append(f"图层规则[{i}].srid 必须为非负整数（0 表示坐标系未知）: {srid!r}")
         return errs
 
 

@@ -18,6 +18,27 @@ from .gdb_reader import pg_geom_type
 
 PG_MAX_IDENT_BYTES = 63
 
+# ------------------------------------------------------------------ 坐标系标准
+# 【项目约定】数据源读不到 CRS 时，几何列建为 SRID=0，不阻断导入。
+#
+# 解析顺序（首个非 None 者生效，SHP / GDB 等所有数据源统一适用）：
+#
+#   1. rule.srid        逐图层显式指定（最高优先级，可用于纠正脏数据）
+#   2. 图层自带 SRS       .prj / GDB 内嵌坐标系，经 OGR authority code 解析
+#   3. default.srid     配置级兜底，供已知数据缺失 CRS 时人工补齐
+#   4. UNKNOWN_SRID(0)  以上都取不到 -> 建 SRID=0 的列并给出提示
+#
+# 为什么用 0 而不是报错或猜测：Shapefile 常缺 .prj（GDAL 返回 srs=None）。
+# 旧行为是直接报错要求配置 default.srid，用户往往会随手填一个（例如把米制
+# 投影数据标成地理坐标系 4490），产生**静默错误的坐标语义**——PostGIS 不会
+# 校验标签与坐标是否自洽。建为 0 语义诚实，后续可无损修正：
+#
+#   SELECT UpdateGeometrySRID('schema','table','geom_col', <正确SRID>);
+#
+# 注意：列建 SRID=0 时，写入的 EWKB 也必须清除头部 SRID（见 strip_ewkb_srid），
+# 因为 PostGIS 的 typmod 不会把行内 SRID 强制改成列值。
+UNKNOWN_SRID = 0
+
 # OGR 字段类型码 -> PG 类型（宽字符串并入 String 处理）
 _OGR_TO_PG = {
     ogr.OFTInteger: "integer",
@@ -126,7 +147,14 @@ def geom_plan(meta: dict, rule, defaults) -> tuple[Optional[str], Optional[int],
 
     - geometries=False -> 不导入几何；
     - 类型未知/CURVE 类 -> 'GENERIC'（泛型 geometry 列）；
-    - SRID 优先级：图层规则 > 图层自带 SRS > default.srid；都没有 -> 错误。
+    - SRID 优先级：图层规则 > 图层自带 SRS > default.srid；
+      都取不到时回落 **SRID=0**（CRS 未知），不再阻断导入。
+
+    SRID=0 是 PostGIS 表示「无坐标系」的标准取值。Shapefile 常缺 .prj，
+    此时 GDAL 返回 srs=None；旧行为是直接报错要求配置 default.srid，
+    但很多数据确实没有可靠 CRS，强行填一个（如把米制投影数据标成 4490）
+    会产生静默错误的坐标语义。建为 0 更诚实，后续可 UpdateGeometrySRID
+    修正而不必重导。
     """
     issues: list[str] = []
     if not defaults.geometries:
@@ -142,7 +170,7 @@ def geom_plan(meta: dict, rule, defaults) -> tuple[Optional[str], Optional[int],
         geom_pg = "GENERIC" + dimension.upper()
         issues.append(f"图层几何类型 {meta['geom_name']} 映射为泛型 geometry 列")
 
-    # SRID 优先级：图层规则强制 > 图层自带 SRS > default.srid 兜底
+    # SRID 优先级：图层规则强制 > 图层自带 SRS > default.srid > 0（未知）
     forced = rule.srid
     layer_srid = layer_srs_srid(meta["srs"])
     if forced is not None:
@@ -151,8 +179,15 @@ def geom_plan(meta: dict, rule, defaults) -> tuple[Optional[str], Optional[int],
         srid = forced
     elif layer_srid is not None:
         srid = layer_srid
-    else:
+    elif defaults.srid is not None:
         srid = defaults.srid
+    else:
+        srid = UNKNOWN_SRID
+        issues.append(
+            "图层无坐标系（缺 .prj / SRS 为空）且未配置 default.srid，"
+            "几何列按 SRID=0（未知坐标系）建立；"
+            "确认坐标系后可用 SELECT UpdateGeometrySRID(...) 修正"
+        )
     return geom_pg, srid, issues
 
 
@@ -273,8 +308,8 @@ def build_layer_plan(source: str, rule, meta, defaults, schema: str,
     if mode not in ("create", "overwrite", "append"):
         errors.append(f"非法 mode: {mode}")
 
-    if geom_pg is not None and srid is None:
-        errors.append("无法确定 SRID：图层无 SRS 且未配置 default.srid / rule.srid")
+    # geom_plan 保证：只要有几何列，srid 必为整数（未知时回落 UNKNOWN_SRID=0），
+    # 因此这里不再因「取不到 SRID」阻断导入；无几何时 srid 与 geom_pg 同为 None。
 
     return LayerPlan(
         source=source,

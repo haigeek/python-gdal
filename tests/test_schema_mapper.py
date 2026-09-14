@@ -121,6 +121,56 @@ def test_gdb_native_fid_strategy_is_unchanged():
     assert "OBJECTID" not in {src for src, _dst, _pg in plan.columns}
 
 
+def test_build_layer_plan_unknown_crs_falls_back_to_srid_0():
+    """CRS 未知（缺 .prj）时不再报错阻断，改为建 SRID=0 的列。
+
+    旧行为是 errors 里写「无法确定 SRID」并要求配置 default.srid；
+    实测数据常缺 .prj，强行猜一个 SRID 会产出静默错误的坐标语义。
+    """
+    defaults = Defaults(srid=None, mode="create")
+    meta = {"geom_ogrid": ogr.wkbPoint, "geom_name": "Point", "srs": None,
+            "fields": [{"name": "nm", "type": ogr.OFTString, "width": 0}],
+            "feature_count": 3}
+    plan = sm.build_layer_plan("pts", LayerRule(source="pts"), meta, defaults, "public")
+    assert not plan.errors, plan.errors
+    assert plan.srid == 0, plan.srid
+    assert plan.geometry_pg == "POINT", plan.geometry_pg
+    assert any("SRID=0" in i for i in plan.issues), plan.issues
+
+
+def test_geom_ddl_keeps_srid_0_typmod():
+    """srid=0 必须写成 geometry(Type,0)，不能用真值判断退化成无 typmod 列。"""
+    from gdb2pg.pg_writer import PgWriter
+    assert PgWriter._geom_ddl("shape", "MULTILINESTRING", 0) is not None
+    sql0 = PgWriter._geom_ddl("shape", "MULTILINESTRING", 0).as_string(None)
+    sql4490 = PgWriter._geom_ddl("shape", "MULTILINESTRING", 4490).as_string(None)
+    sqlnone = PgWriter._geom_ddl("shape", "MULTILINESTRING", None).as_string(None)
+    assert sql0 == '"shape" geometry(MULTILINESTRING,0)', sql0
+    assert sql4490 == '"shape" geometry(MULTILINESTRING,4490)', sql4490
+    # 仅 srid=None 才省略 typmod
+    assert sqlnone == '"shape" geometry(MULTILINESTRING)', sqlnone
+
+
+def test_strip_ewkb_srid_removes_header_srid():
+    """SRID=0 时必须清掉 EWKB 头部 SRID，否则行内 SRID 与列定义不一致。"""
+    from gdb2pg.gdb_reader import set_ewkb_srid, strip_ewkb_srid
+    line = ogr.Geometry(ogr.wkbLineString)
+    line.AddPoint_2D(1.0, 2.0)
+    line.AddPoint_2D(3.0, 4.0)
+    plain = line.ExportToWkb(ogr.wkbNDR)
+
+    stripped = strip_ewkb_srid(set_ewkb_srid(plain, 4490))
+    assert not (int.from_bytes(stripped[1:5], "little") & 0x20000000)
+    assert stripped == plain, "清除后应还原为原始 ISO WKB"
+
+    # 本就不含 SRID 时保持不变
+    assert strip_ewkb_srid(plain) == plain
+
+    # 清除后仍可被 OGR 解析（几何未损坏）
+    geom = ogr.CreateGeometryFromWkb(stripped)
+    assert geom.GetGeometryName().upper() == "LINESTRING"
+    assert geom.GetPointCount() == 2
+
 
 if __name__ == "__main__":
     for fn in [v for k, v in sorted(globals().items()) if k.startswith("test_")]:
