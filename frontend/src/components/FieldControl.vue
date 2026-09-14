@@ -20,7 +20,7 @@
     v-else-if="type === 'int'"
     :model-value="modelValue as number | null"
     :controls="false"
-    :min="1"
+    :min="0"
     :placeholder="'留空 = 继承'"
     style="max-width: 420px; width: 100%"
     @update:model-value="emitValue"

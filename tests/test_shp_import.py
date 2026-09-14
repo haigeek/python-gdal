@@ -360,6 +360,15 @@ def test_srid_zero_is_accepted_by_validation():
             assert [e for e in task.validate(cfg) if "srid" in e], bad
 
 
+
+def test_int_form_fields_allow_zero():
+    """表单 int 控件不得把 0 钳制成 1（Element Plus :min 会静默改写输入值）。"""
+    root = Path(__file__).resolve().parent.parent / "frontend" / "src" / "components"
+    for name in ("FieldControl.vue", "DynamicForm.vue"):
+        src = (root / name).read_text(encoding="utf-8")
+        assert ':min="1"' not in src, f"{name} 中的 :min=1 会把合法值 0 钳制成 1"
+        assert ':min="0"' in src, f"{name} 应允许 0"
+
 def main() -> int:
     tests = [test_task_registry_and_validation,
              test_plan_preserves_conflicting_attributes,
@@ -369,7 +378,8 @@ def main() -> int:
              test_multilinestring_beyond_sample_window_promotes_column,
              test_pure_single_part_layer_stays_linestring,
              test_multi_wkb_wraps_single_geometry_as_sub_geometry,
-             test_srid_zero_is_accepted_by_validation]
+             test_srid_zero_is_accepted_by_validation,
+             test_int_form_fields_allow_zero]
     for test in tests:
         test()
         print(f"PASS {test.__name__}")

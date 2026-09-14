@@ -77,7 +77,7 @@
                 :key="col.key"
                 :model-value="row[col.key] as number | null"
                 :controls="false"
-                :min="1"
+                :min="0"
                 :placeholder="col.label"
                 style="width: 130px"
                 @update:model-value="(v: number | null) => setCell(row, col.key, v)"
